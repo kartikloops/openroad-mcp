@@ -197,6 +197,32 @@ class PTYHandler:
                 return None
             raise PTYError(f"Failed to read from PTY: {e}") from e
 
+    async def drain_output(self, timeout: float = 2.0, idle_timeout: float = 0.1) -> bytes:
+        """Drain all available PTY output, retrying until the buffer is idle.
+
+        On macOS, PTY buffer propagation to master_fd is not ordered with
+        respect to process exit. A single read_output() immediately after
+        wait_for_exit() may return None even though output is still in flight.
+        This method retries with small yields until no new data arrives for
+        idle_timeout seconds, or the total timeout is exceeded.
+        """
+        loop = asyncio.get_event_loop()
+        collected = b""
+        deadline = loop.time() + timeout
+        last_data_at = loop.time()
+
+        while loop.time() < deadline:
+            chunk = await self.read_output()
+            if chunk:
+                collected += chunk
+                last_data_at = loop.time()
+            else:
+                if collected and (loop.time() - last_data_at) >= idle_timeout:
+                    break
+                await asyncio.sleep(0.02)
+
+        return collected
+
     def is_process_alive(self) -> bool:
         """Check if the spawned process is still alive."""
         if self.process is None:
