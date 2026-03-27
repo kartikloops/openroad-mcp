@@ -57,9 +57,8 @@ class TestPTYIntegration:
         exit_code = await pty_handler.wait_for_exit(timeout=2.0)
         assert exit_code == 0
 
-        # Read output
-        output = await pty_handler.read_output()
-        assert output is not None
+        # Drain output - macOS PTY buffer may not flush synchronously with exit
+        output = await pty_handler.drain_output()
         assert b"hello world" in output
 
     @skip_if_no_pty
@@ -100,11 +99,8 @@ class TestPTYIntegration:
         exit_code = await pty_handler.wait_for_exit(timeout=2.0)
         assert exit_code == 0
 
-        # Read all output
-        output = await pty_handler.read_output()
-        assert output is not None
-
-        output_str = output.decode("utf-8", errors="ignore")
+        # Drain output - macOS PTY buffer may not flush synchronously with exit
+        output_str = (await pty_handler.drain_output()).decode("utf-8", errors="ignore")
         assert "line1" in output_str
         assert "line2" in output_str
         assert "line3" in output_str
@@ -192,11 +188,8 @@ class TestPTYIntegration:
         exit_code = await pty_handler.wait_for_exit(timeout=2.0)
         assert exit_code == 0
 
-        # Read output
-        output = await pty_handler.read_output()
-        assert output is not None
-
-        output_str = output.decode("utf-8", errors="ignore")
+        # Drain output - macOS PTY buffer may not flush synchronously with exit
+        output_str = (await pty_handler.drain_output()).decode("utf-8", errors="ignore")
         assert "test_value" in output_str  # Environment variable
         assert "test.txt" in output_str  # File from working directory
 
@@ -217,14 +210,8 @@ class TestPTYIntegration:
         exit_code = await pty_handler.wait_for_exit(timeout=5.0)
         assert exit_code == 0
 
-        # Read output in chunks
-        collected_output = b""
-        while True:
-            output = await pty_handler.read_output()
-            if output:
-                collected_output += output
-            else:
-                break
+        # Drain output - macOS PTY buffer may not flush synchronously with exit
+        collected_output = await pty_handler.drain_output(timeout=5.0)
 
         # Verify we got substantial output
         assert len(collected_output) > 1000
@@ -267,6 +254,6 @@ class TestPTYIntegration:
         exit_code = await pty_handler.wait_for_exit(timeout=2.0)
         assert exit_code == 0
 
-        output = await pty_handler.read_output()
-        assert output is not None
+        # Drain output - macOS PTY buffer may not flush synchronously with exit
+        output = await pty_handler.drain_output()
         assert b"second" in output
