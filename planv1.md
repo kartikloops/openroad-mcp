@@ -10,50 +10,22 @@ HTTP transports, enforced by golden-fixture tests against Python-generated JSON
 in `tests/golden/`.
 
 **v1.0 goal (per team decisions):** TypeScript-only server; Python kept as a
-deprecated, unmaintained package. Theme: *Docker deployment, cross-platform
-support, production-ready testing & QA*.
+deprecated, unmaintained package.
 
 **Decisions made for this plan:**
-- **Timeline:** v1.0 in late Aug / September 2026 (6 to 9 weeks).
+- **Timeline:** v1.0 in late Aug
 - **SDK v2 package migration and 2026-07-28 protocol adoption are separate
   decisions.** For v1.0, the safe default is to migrate to the v2 packages and
   keep protocol behavior compatible with existing 2025-era clients. The team can
   enable the 2026-07-28 protocol revision later, or serve it alongside the older
   behavior, after mentor review.
-- **In scope:** session persistence (#57), configurable Docker/CLI vars (#48).
-  Flow orchestration (#95/#122) deferred to v1.x.
 - **Runtime stays npm / Node 22 or newer**. Do not switch to Bun because
   node-pty/sharp prebuilds and ecosystem `npx` conventions matter here. SDK v2
-  requires Node 20 or newer, so Node 22 is fine.
+  requires Node 20 or newer, so Node 22 is fine. openroad/openroad-mcp` Docker Hub image.
 
-**Key upstream facts:** repo lives at `The-OpenROAD-Project/OpenROAD-MCP`;
-releases already dual-publish PyPI + npm + GHCR + MCP Registry through `release.yml`;
-issue #132 requests an official `openroad/openroad-mcp` Docker Hub image.
 
-### SDK v2 and the 2026-07-28 protocol revision
 
-These are not the same migration.
-
-The MCP team says projects can move to SDK v2 first and enable the new protocol
-revision when ready. That means OpenROAD-MCP can upgrade the TypeScript packages
-before v1.0 without forcing every client onto the 2026-07-28 behavior.
-
-For this roadmap, use this rule:
-
-1. Move to the SDK v2 packages before v1.0 if the migration stays mechanical.
-2. Keep existing client behavior working during the v1.0 release.
-3. Treat the 2026-07-28 protocol revision as a separate product decision because
-   it changes behavior, including stateless routing, `Mcp-Method` and `Mcp-Name`
-   headers, `ttlMs`, and `cacheScope`.
-4. Decide with mentors whether v1.0 freezes only the stable current behavior or
-   also advertises the 2026-07-28 behavior alongside it.
-
-This removes the contradiction: SDK v2 is planned before v1.0, but the new
-protocol revision does not automatically become the v1.0 API contract.
-
----
-
-## Phase 0: v0.6.0 (tonight, before tagging)
+## Phase 0: v0.6.0
 
 Split by whether the item can break the release.
 
@@ -94,8 +66,8 @@ Split by whether the item can break the release.
 - Add macOS (macos-14/15, arm64) runners for the TS suite. Currently TS is
   ubuntu-only while Python CI already covers macOS.
 - Add an `npx` install smoke job: `npm pack` the tarball, install it fresh, run
-  `openroad-mcp --help`. This validates node-pty/sharp prebuilt binary resolution on
-  all OS runners.
+  `openroad-mcp --help`. This validates node-pty/sharp prebuilt binary
+  resolution on all OS runners.
 - **Audit `scripts/fix-node-pty.cjs` (postinstall).** It runs on every
   `npx`/`npm ci`; a failure on one platform breaks install there. Confirm whether
   current node-pty prebuilds make the shim unnecessary; the smoke job is the gate.
@@ -112,8 +84,6 @@ Split by whether the item can break the release.
 - Update `server.json`'s `oci` package entry to the TS image once published.
 - Add explicit `--platform linux/amd64` to all builds (`openroad/orfs` base is
   x86_64-only; prevents silent QEMU fallback on Apple Silicon).
-- Implement **#48** (configurable Docker image / CLI variables). This is small and squarely
-  in the Docker theme.
 - **Start #132 (Docker Hub `openroad/openroad-mcp`). Mark it blocked on org
   coordination.** Requires org-level Docker Hub credentials/secrets that don't
   exist yet; must not stall v1.0 if creds lag. Add Docker Hub as a second push
@@ -121,7 +91,7 @@ Split by whether the item can break the release.
 
 ### Supply chain
 - Switch npm publish from `NPM_TOKEN` to **npm trusted publishing (OIDC)**.
-  configure on npmjs.com after the first publish exists; `id-token: write` is
+  Configure on npmjs.com after the first publish exists; `id-token: write` is
   already in `release.yml`; provenance then comes automatically. Note:
   trusted-publisher configs created after 2026-05-20 must explicitly select
   allowed actions.
@@ -130,16 +100,13 @@ Split by whether the item can break the release.
   validation, currently missing).
 
 ### Docs
-- TS-specific README section / restructure (npm/uvx stay side-by-side for now,
+- TS-specific README section / restructure (npm/uvx stay side by side for now,
   per team decision); refresh `ROADMAP.md` (stale since March, still says
   "Phase 1 -> v0.5").
 
 ---
 
-## Phase 2: v0.8.0 (~mid-August): SDK v2 packages + cross-platform
-
-> Sequencing note: do the **golden canonicality flip as an isolated no-op step
-> BEFORE the SDK migration** so wire diffs are attributable. See below.
+## Phase 2: v0.8.0: SDK v2 packages + cross-platform
 
 ### Step 2a: Flip golden canonicality Python-to-TS (no-op, still on SDK v1)
 - Regenerate goldens against the **TS server while still on SDK v1**, so output
@@ -190,7 +157,7 @@ Split by whether the item can break the release.
 
 ---
 
-## Phase 3: v0.9.0 = v1.0-rc (~late August): QA hardening + Python deprecation
+## Phase 3: v0.9.0 : QA hardening + Python deprecation
 
 ### Production testing & QA (five gates: smoke / conformance / scenarios / load / security)
 - **MCP Inspector CLI e2e in CI** (#60): tool discoverability + response-shape
@@ -224,7 +191,7 @@ Split by whether the item can break the release.
 
 ---
 
-## Phase 4: v1.0.0 (early to mid September)
+## Phase 4: v1.0.0 
 
 - **API freeze:** the 10 tool signatures + session-persistence additions frozen;
   documented semver commitment + deprecation policy. Decide (with mentors)
@@ -241,31 +208,3 @@ Split by whether the item can break the release.
   `python-legacy` branch and removed from `main` after v1.0.
 - **Stretch/after:** submit to the **Docker MCP Catalog** (containerized,
   sandboxed distribution; a good fit since the image bundles OpenROAD/ORFS).
-
----
-
-## Critical files
-
-- **Workflows:** `release.yml`, `docker-publish.yml`, `ci.yaml`, `ts-ci.yml`,
-  `cross-platform.yml`
-- **Docker/build:** `Dockerfile.ts` (becomes the published image), `Dockerfile`
-  (Python, transition-only), `Makefile` (`IMAGE_NAME`, `ORFS_VERSION`, `test-all`)
-- **Package/config:** `typescript/package.json`, `typescript/src/server.ts`,
-  `server.json`, `README.md`, `docs/CROSS_PLATFORM.md`, `ROADMAP.md`
-- **Reuse:** the `/release` skill (version-bump automation),
-  `tests/golden/generate_golden.py` + `make golden`, existing in-memory transport
-  tests in `typescript/__tests__/golden/tool_manifest.test.ts`
-
-## Verification
-
-- **Tonight:** after tagging, watch `release.yml` until all jobs are green; then
-  `npx -y openroad-mcp@0.6.0 --help`,
-  `docker pull ghcr.io/the-openroad-project/openroad-mcp:0.6.0`, and confirm the
-  server appears/updates on the MCP registry with the npm package entry validated
-  (this is what the `mcpName` field gates).
-- **Each phase:** CI matrix green on all OS runners; `make test-all` (Python+TS
-  aggregate) passes until Python freeze; golden parity green until the
-  canonicality flip, then TS-golden green.
-- **v1.0 gate:** Inspector e2e + nangate45/gcd nightly + load test + benchmarks
-  all green for 2 consecutive weeks; fresh-machine install validated on Ubuntu,
-  macOS (arm64), Windows (Docker & WSL2) following only the docs.
