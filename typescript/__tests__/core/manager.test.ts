@@ -16,6 +16,7 @@ vi.mock("../../src/interactive/session.js", () => {
 interface MockSession {
   sessionId: string;
   lastActivity: Date;
+  terminatedAt: Date | null;
   checkAlive: Mock;
   start: Mock;
   sendCommand: Mock;
@@ -23,6 +24,8 @@ interface MockSession {
   getInfo: Mock;
   getDetailedMetrics: Mock;
   getCommandHistory: Mock;
+  replayCommand: Mock;
+  filterOutput: Mock;
   isIdleTimeout: Mock;
   setSessionTimeout: Mock;
   terminate: Mock;
@@ -47,6 +50,7 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
   return {
     sessionId,
     lastActivity: new Date(),
+    terminatedAt: null,
     checkAlive: vi.fn().mockReturnValue(alive),
     start: vi.fn().mockResolvedValue(undefined),
     sendCommand: vi.fn().mockResolvedValue(undefined),
@@ -70,6 +74,8 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
     }),
     getDetailedMetrics: vi.fn().mockResolvedValue(metrics),
     getCommandHistory: vi.fn().mockReturnValue([]),
+    replayCommand: vi.fn().mockResolvedValue("replayed output"),
+    filterOutput: vi.fn().mockResolvedValue(["matched line"]),
     isIdleTimeout: vi.fn().mockReturnValue(false),
     setSessionTimeout: vi.fn(),
     terminate: vi.fn().mockResolvedValue(undefined),
@@ -262,6 +268,166 @@ describe("OpenROADManager", () => {
   describe("_getSession behaviour via public methods", () => {
     it("getSessionInfo throws SessionNotFoundError for an unknown id", async () => {
       await expect(manager.getSessionInfo("ghost")).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+
+    it("throws SessionError when the session is still being created", async () => {
+      MockedSession.mockImplementationOnce(function (this: unknown, sessionId: string) {
+        const mock = makeMockSession(sessionId);
+        mock.start.mockReturnValue(new Promise<void>(() => {})); // never resolves
+        created.push(mock);
+        return mock as unknown as InteractiveSession;
+      } as unknown as (sessionId: string) => InteractiveSession);
+      void manager.createSession({ sessionId: "pending" });
+      // Flush microtasks so createSession's exclusive callback runs far enough
+      // to set the null placeholder before start()'s never-resolving promise
+      // parks it — cleanupLock.runExclusive and _cleanupTerminatedSessions
+      // each add an await hop.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      await expect(manager.executeCommand("pending", "version")).rejects.toThrow(/still being created/);
+    });
+  });
+
+  describe("replayCommand, filterSessionOutput, setSessionTimeout", () => {
+    it("replayCommand delegates to the session", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      const output = await manager.replayCommand("s1", 3);
+      expect(created[0]!.replayCommand).toHaveBeenCalledWith(3);
+      expect(output).toBe("replayed output");
+    });
+
+    it("filterSessionOutput delegates to the session with the maxLines default", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      const lines = await manager.filterSessionOutput("s1", "ERROR");
+      expect(created[0]!.filterOutput).toHaveBeenCalledWith("ERROR", 1000);
+      expect(lines).toEqual(["matched line"]);
+    });
+
+    it("setSessionTimeout delegates to the session", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.setSessionTimeout("s1", 120);
+      expect(created[0]!.setSessionTimeout).toHaveBeenCalledWith(120);
+    });
+  });
+
+  describe("createSession bufferSize forwarding", () => {
+    it("forwards an explicit positive bufferSize as-is", async () => {
+      await manager.createSession({ sessionId: "s1", bufferSize: 4096 });
+      expect(MockedSession).toHaveBeenCalledWith("s1", 4096);
+    });
+  });
+
+  describe("executeCommand timeout forwarding", () => {
+    it("forwards an explicit positive timeoutMs as-is", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.executeCommand("s1", "report_wns", 5000);
+      expect(created[0]!.readOutput).toHaveBeenCalledWith(5000);
+    });
+  });
+
+  describe("listSessions error handling", () => {
+    it("skips a session whose getInfo() rejects and still returns the rest", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.createSession({ sessionId: "s2" });
+      created[0]!.getInfo.mockRejectedValueOnce(new Error("boom"));
+
+      const infos = await manager.listSessions();
+      expect(infos.map((i) => i.sessionId)).toEqual(["s2"]);
+    });
+  });
+
+  describe("sessionMetrics edge cases", () => {
+    it("skips a session whose getDetailedMetrics() rejects and still aggregates the rest", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.createSession({ sessionId: "s2" });
+      created[0]!.getDetailedMetrics.mockRejectedValueOnce(new Error("boom"));
+
+      const metrics = await manager.sessionMetrics();
+      expect(metrics.sessions).toHaveLength(1);
+      expect(metrics.sessions[0]!.sessionId).toBe("s2");
+    });
+
+    it("reports zero utilization when maxSessions is 0", async () => {
+      const zeroCapacity = new OpenROADManager(0);
+      const metrics = await zeroCapacity.sessionMetrics();
+      expect(metrics.manager.utilizationPercent).toBe(0);
+    });
+
+    it("reports zero average memory when there are no active sessions", async () => {
+      const metrics = await manager.sessionMetrics();
+      expect(metrics.aggregate.avgMemoryPerSession).toBe(0);
+    });
+  });
+
+  describe("cleanupIdleSessions error handling", () => {
+    it("logs and continues when isIdleTimeout() throws for one session", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.createSession({ sessionId: "s2" });
+      created[0]!.isIdleTimeout.mockImplementationOnce(() => {
+        throw new Error("boom");
+      });
+      created[1]!.isIdleTimeout.mockReturnValue(true);
+
+      const cleaned = await manager.cleanupIdleSessions(300, true);
+      expect(cleaned).toBe(1);
+      expect(manager.getSessionCount()).toBe(1);
+    });
+  });
+
+  describe("cleanupAll", () => {
+    it("force-terminates every session", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      await manager.cleanupAll();
+      expect(created[0]!.terminate).toHaveBeenCalledWith(true);
+      expect(manager.getSessionCount()).toBe(0);
+    });
+  });
+
+  describe("_cleanupTerminatedSessions via listSessions", () => {
+    it("cleans up a recently-dead session without force", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      created[0]!.checkAlive.mockReturnValue(false);
+      created[0]!.lastActivity = new Date();
+
+      const infos = await manager.listSessions();
+      expect(infos).toHaveLength(0);
+      expect(created[0]!.cleanup).toHaveBeenCalledOnce();
+      expect(manager.getSessionCount()).toBe(0);
+    });
+
+    it("force-cleans a session dead long past the grace period, keyed off terminatedAt", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      created[0]!.checkAlive.mockReturnValue(false);
+      created[0]!.terminatedAt = new Date(Date.now() - 120_000); // 120s > 60s threshold
+
+      const infos = await manager.listSessions();
+      expect(infos).toHaveLength(0);
+      expect(created[0]!.cleanup).toHaveBeenCalledOnce();
+      expect(manager.getSessionCount()).toBe(0);
+    });
+
+    it("still removes the session if a non-force cleanup() rejects", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      created[0]!.checkAlive.mockReturnValue(false);
+      created[0]!.lastActivity = new Date();
+      created[0]!.cleanup.mockRejectedValueOnce(new Error("cleanup boom"));
+
+      const infos = await manager.listSessions();
+      expect(infos).toHaveLength(0);
+      expect(manager.getSessionCount()).toBe(0);
+    });
+
+    it("still removes the session if a force cleanup() rejects", async () => {
+      await manager.createSession({ sessionId: "s1" });
+      created[0]!.checkAlive.mockReturnValue(false);
+      created[0]!.terminatedAt = new Date(Date.now() - 120_000);
+      created[0]!.cleanup.mockRejectedValueOnce(new Error("force cleanup boom"));
+
+      const infos = await manager.listSessions();
+      expect(infos).toHaveLength(0);
+      expect(manager.getSessionCount()).toBe(0);
     });
   });
 });
