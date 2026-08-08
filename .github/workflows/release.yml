@@ -38,9 +38,13 @@ jobs:
       - name: Run tests
         run: npm run test
 
+  docker-test:
+    name: Docker test stage (real OpenROAD)
+    uses: ./.github/workflows/docker-test.yml
+
   publish-npm:
     name: Publish to npm
-    needs: test
+    needs: [test, docker-test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,7 +87,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: test
+    needs: [test, docker-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -106,7 +110,7 @@ jobs:
 
   publish-docker:
     name: Publish Docker image
-    needs: test
+    needs: [test, docker-test]
     uses: ./.github/workflows/docker-publish.yml
     with:
       image_tag: ${{ github.ref_name }}
