@@ -4,7 +4,7 @@
 # =============================================================================
 set -euo pipefail
 
-echo "🔧 Setting up OpenROAD-MCP on macOS..."
+echo "Setting up OpenROAD-MCP on macOS..."
 
 if [[ -z "${CI:-}" ]]; then
     read -r -p "This script will install Node.js and project dependencies. Continue? [y/N] " response
@@ -19,16 +19,16 @@ if ! command -v node &>/dev/null || ! node --version | grep -qE "^v22\."; then
         echo "Homebrew is required to install Node.js. Install it from https://brew.sh and re-run this script." >&2
         exit 1
     fi
-    echo "📦 Installing Node.js 22..."
+    echo "Installing Node.js 22..."
     brew install node@22
     export PATH="$(brew --prefix node@22)/bin:$PATH"
 fi
 
-echo "📦 Installing project dependencies..."
+echo "Installing project dependencies..."
 (cd typescript && npm ci && npm run build)
 
 echo ""
-echo "✅ macOS setup complete!"
+echo "macOS setup complete."
 echo ""
 echo "Next steps:"
 echo "  1. Install OpenROAD (optional, for full flows):"

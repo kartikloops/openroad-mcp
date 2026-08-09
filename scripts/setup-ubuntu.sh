@@ -4,7 +4,7 @@
 # =============================================================================
 set -euo pipefail
 
-echo "🔧 Setting up OpenROAD-MCP on Ubuntu..."
+echo "Setting up OpenROAD-MCP on Ubuntu..."
 
 if [[ -z "${CI:-}" ]]; then
     read -r -p "This script will install system packages and project dependencies. Continue? [y/N] " response
@@ -20,16 +20,16 @@ sudo apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg build-essential
 
 if ! command -v node &>/dev/null || ! node --version | grep -qE "^v22\."; then
-    echo "📦 Installing Node.js 22..."
+    echo "Installing Node.js 22..."
     curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
     sudo apt-get install -y --no-install-recommends nodejs
 fi
 
-echo "📦 Installing project dependencies..."
+echo "Installing project dependencies..."
 (cd typescript && npm ci && npm run build)
 
 echo ""
-echo "✅ Ubuntu setup complete!"
+echo "Ubuntu setup complete."
 echo ""
 echo "Next steps:"
 echo "  1. Install OpenROAD: https://openroad.readthedocs.io/en/latest/main/GettingStarted.html"
