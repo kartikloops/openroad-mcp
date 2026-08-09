@@ -7,21 +7,25 @@ set -euo pipefail
 echo "🔧 Setting up OpenROAD-MCP on macOS..."
 
 if [[ -z "${CI:-}" ]]; then
-    read -r -p "This script will install uv and project dependencies. Continue? [y/N] " response
+    read -r -p "This script will install Node.js and project dependencies. Continue? [y/N] " response
     if [[ ! "$response" =~ ^[Yy]$ ]]; then
         echo "Aborted."
         exit 0
     fi
 fi
 
-if ! command -v uv &>/dev/null; then
-    echo "📦 Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+if ! command -v node &>/dev/null || ! node --version | grep -qE "^v22\."; then
+    if ! command -v brew &>/dev/null; then
+        echo "Homebrew is required to install Node.js. Install it from https://brew.sh and re-run this script." >&2
+        exit 1
+    fi
+    echo "📦 Installing Node.js 22..."
+    brew install node@22
+    export PATH="$(brew --prefix node@22)/bin:$PATH"
 fi
 
 echo "📦 Installing project dependencies..."
-(cd python && uv sync --all-extras --inexact)
+(cd typescript && npm ci && npm run build)
 
 echo ""
 echo "✅ macOS setup complete!"
