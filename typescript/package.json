@@ -24,6 +24,7 @@
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "lint": "eslint .",
+    "audit": "npm audit --audit-level=high",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "vitest run --config vitest.config.integration.ts",
