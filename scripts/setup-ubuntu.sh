@@ -14,19 +14,19 @@ if [[ -z "${CI:-}" ]]; then
     fi
 fi
 
+# build-essential is needed for node-pty and sharp's native addon builds.
 sudo apt-get update
-sudo apt-get install -y \
-    python3 python3-dev \
-    build-essential curl
+sudo apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg build-essential
 
-if ! command -v uv &>/dev/null; then
-    echo "📦 Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+if ! command -v node &>/dev/null || ! node --version | grep -qE "^v22\."; then
+    echo "📦 Installing Node.js 22..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get install -y --no-install-recommends nodejs
 fi
 
 echo "📦 Installing project dependencies..."
-(cd python && uv sync --all-extras --inexact)
+(cd typescript && npm ci && npm run build)
 
 echo ""
 echo "✅ Ubuntu setup complete!"
@@ -34,4 +34,4 @@ echo ""
 echo "Next steps:"
 echo "  1. Install OpenROAD: https://openroad.readthedocs.io/en/latest/main/GettingStarted.html"
 echo "  2. Run tests:        make test"
-echo "  3. Start MCP server: uv run --project python openroad-mcp"
+echo "  3. Start MCP server: npx -y openroad-mcp"
