@@ -32,13 +32,31 @@ jobs:
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      # The scripts cd into typescript/ themselves and run npm ci + npm run
+      # build, so they must run from the repo root, not the job's typescript/
+      # default. Node is already on PATH from setup-node above; the scripts
+      # detect that and skip reinstalling it.
+      - name: Run Ubuntu setup script
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: bash scripts/setup-ubuntu.sh
 
-      - name: Build
-        run: npm run build
+      - name: Run macOS setup script
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: bash scripts/setup-macos.sh
 
       - name: Smoke-test entrypoint
         # Exercises node-pty and sharp native module loading — this is the
         # check that actually matters for cross-platform compatibility.
         run: node dist/main.js --help
+
+      - name: Run unit tests
+        run: npm run test
+
+      - name: Run integration tests
+        # pty_integration.test.ts runs unconditionally (generic bash/echo/cat
+        # processes, no OpenROAD needed). openroad_repl.test.ts self-skips via
+        # describe.skipIf when openroad isn't on PATH, which none of these
+        # runners have — it reports skipped, not failed.
+        run: npm run test:integration
