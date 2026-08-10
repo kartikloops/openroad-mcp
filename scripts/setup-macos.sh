@@ -14,7 +14,15 @@ if [[ -z "${CI:-}" ]]; then
     fi
 fi
 
-if ! command -v node &>/dev/null || ! node --version | grep -qE "^v22\."; then
+node_major=0
+if command -v node &>/dev/null; then
+    node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+    [[ "$node_major" =~ ^[0-9]+$ ]] || node_major=0
+fi
+
+# package.json declares "node": ">=22" — any major >= 22 already satisfies it,
+# not only exactly 22.
+if [ "$node_major" -lt 22 ]; then
     if ! command -v brew &>/dev/null; then
         echo "Homebrew is required to install Node.js. Install it from https://brew.sh and re-run this script." >&2
         exit 1
