@@ -63,6 +63,7 @@ jobs:
         run: docker run --rm openroad-mcp-ts:ci --help
 
   ts-docker-test:
+    name: Docker test stage (real OpenROAD)
     uses: ./.github/workflows/docker-test.yml
 
   ts-perf:
