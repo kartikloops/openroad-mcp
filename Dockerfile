@@ -93,4 +93,12 @@ COPY typescript/__tests__ ./__tests__
 # output) and are already present from the COPY above — no separate copy needed.
 ENV PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/OpenROAD-flow-scripts/tools/install/yosys/bin:$PATH" \
     ORFS_FLOW_PATH=/OpenROAD-flow-scripts/flow
+
+# Fail the build loudly if openroad isn't reachable here, rather than letting
+# openroad_repl.test.ts's hasOpenROAD() check silently skip the real-OpenROAD
+# suite and have npm run test:all exit 0 without it having run.
+RUN command -v openroad \
+    && openroad -version \
+    && echo "OK: openroad on PATH"
+
 CMD ["npm", "run", "test:all"]
