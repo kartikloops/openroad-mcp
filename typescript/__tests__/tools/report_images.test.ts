@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import {
   classifyImageType,
   ListReportImagesTool,
@@ -65,6 +66,16 @@ function createFixture(
 
 // Constructor requires a manager but the tools never invoke it.
 const stubManager = {} as unknown as OpenROADManager;
+
+/** Writes a real, sharp-parseable .webp file so metadata()/resize() succeed. */
+async function writeRealWebp(filePath: string, width: number, height: number): Promise<void> {
+  const buffer = await sharp({
+    create: { width, height, channels: 3, background: { r: 100, g: 150, b: 200 } },
+  })
+    .webp()
+    .toBuffer();
+  fs.writeFileSync(filePath, buffer);
+}
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openroad-test-"));
@@ -427,5 +438,258 @@ describe("TestPlatformDesignValidationInTools", () => {
   it("read tool returns error for invalid design", async () => {
     const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "bad_design", "run-123", "img.webp");
     expect(JSON.parse(raw).error).toBeTruthy();
+  });
+});
+
+describe("ListReportImagesTool — additional branch coverage", () => {
+  it("falls back to an empty available-runs list when readdirSync fails while listing runs", async () => {
+    // reportsBase must exist (so realpathSync/containment checks pass) but the
+    // requested run must not — that's the only way availableRuns()'s readdirSync
+    // catch (returning []) is reachable rather than short-circuiting earlier.
+    const { flowPath, runPath } = createFixture();
+    const reportsBase = path.dirname(runPath);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const originalReaddirSync = fs.readdirSync.bind(fs);
+    const readdirSpy = vi.spyOn(fs, "readdirSync").mockImplementation(((p: fs.PathLike, opts?: unknown) => {
+      if (p === reportsBase) throw new Error("EACCES: permission denied");
+      return originalReaddirSync(p as string, opts as never);
+    }) as typeof fs.readdirSync);
+    try {
+      const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "nonexistent-run");
+      const result = JSON.parse(raw);
+      expect(result.error).toBe("RunNotFound");
+      expect(result.message).toContain("none");
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
+  it("descends into real subdirectories to find nested .webp files", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", ["final_all.webp"]);
+    const nested = path.join(runPath, "nested_stage");
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, "cts_clk.webp"), Buffer.from("RIFF\x00\x00\x00\x00WEBP"));
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    expect(result.total_images).toBe(2);
+  });
+
+  it("sorts multiple images within the same stage bucket", async () => {
+    const { flowPath } = createFixture("nangate45", "gcd", "run-123", [
+      "cts_clk.webp",
+      "cts_clk_layout.webp",
+      "cts_core_clock.webp",
+    ]);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    const filenames: string[] = result.images_by_stage.cts.map((i: { filename: string }) => i.filename);
+    expect(filenames).toHaveLength(3);
+    // Assert against localeCompare's own ordering rather than a hardcoded
+    // guess — punctuation-vs-letter collation is locale-dependent.
+    expect(filenames).toEqual([...filenames].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it("returns UnexpectedError when resolveRunPath fails for a non-validation reason", async () => {
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: () => {
+        throw new Error("settings backend unavailable");
+      },
+      flowPath: tmpDir,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    expect(result.error).toBe("UnexpectedError");
+  });
+
+  it("returns an empty list (not an error) when findWebpFiles throws inside an existing run dir", async () => {
+    const { flowPath, runPath } = createFixture();
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const originalReaddirSync = fs.readdirSync.bind(fs);
+    vi.spyOn(fs, "readdirSync").mockImplementation(((p: fs.PathLike, opts?: unknown) => {
+      if (p === runPath) throw new Error("EACCES: permission denied");
+      return originalReaddirSync(p as string, opts as never);
+    }) as typeof fs.readdirSync);
+
+    const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    expect(result.total_images).toBe(0);
+    vi.restoreAllMocks();
+  });
+
+  it("returns UnexpectedError when a later filesystem call fails unexpectedly", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", ["cts_clk.webp"]);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const targetFile = path.join(runPath, "cts_clk.webp");
+    const originalStatSync = fs.statSync.bind(fs);
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((p) => {
+      if (p === targetFile) throw new Error("boom");
+      return originalStatSync(p) as fs.Stats;
+    });
+    const raw = await new ListReportImagesTool(stubManager).execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    expect(result.error).toBe("UnexpectedError");
+    statSpy.mockRestore();
+  });
+});
+
+describe("ReadReportImageTool — additional branch coverage", () => {
+  it("returns UnexpectedError when resolveRunPath fails for a non-validation reason", async () => {
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: () => {
+        throw new Error("settings backend unavailable");
+      },
+      flowPath: tmpDir,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "cts_clk.webp");
+    const result = JSON.parse(raw);
+    expect(result.error).toBe("UnexpectedError");
+  });
+
+  it("returns NotAFile when the requested name is a directory", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    fs.mkdirSync(path.join(runPath, "dir.webp"));
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "dir.webp");
+    const result = JSON.parse(raw);
+    expect(result.error).toBe("NotAFile");
+  });
+
+  it("falls back to an empty available-images list when findWebpFiles throws for ImageNotFound", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", ["cts_clk.webp"]);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const originalReaddirSync = fs.readdirSync.bind(fs);
+    vi.spyOn(fs, "readdirSync").mockImplementation(((p: fs.PathLike, opts?: unknown) => {
+      if (p === runPath) throw new Error("EACCES: permission denied");
+      return originalReaddirSync(p as string, opts as never);
+    }) as typeof fs.readdirSync);
+
+    const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "missing.webp");
+    const result = JSON.parse(raw);
+    expect(result.error).toBe("ImageNotFound");
+    expect(result.message).toContain("none");
+    vi.restoreAllMocks();
+  });
+
+  it("reads a small real .webp image without compression and reports its real dimensions", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "cts_clk.webp"), 4, 4);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "cts_clk.webp");
+    const result = JSON.parse(raw);
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBe(4);
+    expect(result.metadata.height).toBe(4);
+    expect(result.metadata.compression_applied).toBe(false);
+    expect(result.metadata.compression_ratio).toBeNull();
+  });
+
+  it("compresses a large real image and reports a compression ratio", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    // 200x200 solid-color webp comfortably exceeds the 15KB base64 threshold
+    // once raw, forcing the resize/compress branch.
+    await writeRealWebp(path.join(runPath, "final_all.webp"), 200, 200);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const originalStatSync = fs.statSync.bind(fs);
+    const imagePath = path.join(runPath, "final_all.webp");
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((p) => {
+      const real = originalStatSync(p) as fs.Stats;
+      if (p === imagePath) {
+        // Mutate in place (not a spread copy) so prototype methods like
+        // isFile() survive; force the compression branch regardless of how
+        // small sharp's synthetic webp actually compresses to.
+        Object.defineProperty(real, "size", { value: 20 * 1024, configurable: true });
+      }
+      return real;
+    });
+    try {
+      const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "final_all.webp");
+      const result = JSON.parse(raw);
+      expect(result.error).toBeNull();
+      expect(result.metadata.compression_applied).toBe(true);
+      expect(result.metadata.compression_ratio).toBeGreaterThan(0);
+      expect(result.metadata.original_size_bytes).toBeGreaterThan(0);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it("returns UnexpectedError when metadata assembly fails unexpectedly", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", ["cts_clk.webp"]);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const imagePath = path.join(runPath, "cts_clk.webp");
+    const originalStatSync = fs.statSync.bind(fs);
+    const statSpy = vi.spyOn(fs, "statSync").mockImplementation((p) => {
+      const real = originalStatSync(p) as fs.Stats;
+      if (p === imagePath) {
+        // Mutate in place (not a spread copy) so prototype methods like
+        // isFile() survive; a corrupt mtime makes stat.mtime.toISOString()
+        // throw deep inside metadata assembly, after the size/existence checks pass.
+        Object.defineProperty(real, "mtime", { value: undefined, configurable: true });
+      }
+      return real;
+    });
+    try {
+      const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "cts_clk.webp");
+      const result = JSON.parse(raw);
+      expect(result.error).toBe("UnexpectedError");
+    } finally {
+      statSpy.mockRestore();
+    }
   });
 });

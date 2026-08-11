@@ -52,10 +52,14 @@ Run these individually during development and together before opening a PR:
 
 ```bash
 npm run test             # Unit tests (fast, no OpenROAD required)
-npm run test:integration # Integration tests (require OpenROAD on PATH)
+npm run test:integration # Integration tests
 npm run test:performance # Performance / memory benchmarks
 npm run test:all         # Run everything
 ```
+
+*(`test:integration` runs two suites: generic-PTY tests that need no OpenROAD install,
+and an OpenROAD-REPL suite that self-skips — reports skipped, not failed — when
+`openroad` isn't on `PATH`. Only the latter actually requires OpenROAD.)*
 
 *(Tests use [vitest](https://vitest.dev/). Configuration is in `typescript/vitest.config.ts`.)*
 

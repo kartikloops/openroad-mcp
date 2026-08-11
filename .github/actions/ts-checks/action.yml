@@ -1,0 +1,30 @@
+name: TypeScript checks
+description: >
+  Install Node, run npm ci, then the shared gate: npm audit, typecheck, lint.
+  Callers checkout the repo themselves first and add their own test steps
+  after this action, since those diverge per workflow.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e # v4.4.0
+      with:
+        node-version: "22"
+        cache: "npm"
+        cache-dependency-path: typescript/package-lock.json
+
+    - run: npm ci
+      shell: bash
+      working-directory: typescript
+
+    - run: npm run audit
+      shell: bash
+      working-directory: typescript
+
+    - run: npm run typecheck
+      shell: bash
+      working-directory: typescript
+
+    - run: npm run lint
+      shell: bash
+      working-directory: typescript
