@@ -10,7 +10,7 @@ on:
     - cron: "30 2 * * *"
 
 jobs:
-  ts-check:
+  check:
     name: Lint, typecheck, test
     runs-on: ubuntu-latest
     defaults:
@@ -38,7 +38,7 @@ jobs:
           npm run generate:golden
           git diff --exit-code -- __tests__/golden/fixtures/
 
-  ts-docker-build:
+  docker-build:
     name: Docker smoke test
     runs-on: ubuntu-latest
     steps:
@@ -50,11 +50,11 @@ jobs:
       - name: Smoke-run entrypoint from built image
         run: docker run --rm openroad-mcp-ts:ci --help
 
-  ts-docker-test:
+  docker-test:
     name: Docker test stage (real OpenROAD)
     uses: ./.github/workflows/docker-test.yml
 
-  ts-perf:
+  perf:
     name: Performance benchmarks (nightly)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
