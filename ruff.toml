@@ -1,6 +1,5 @@
-# Root config for Python files outside python/ (e.g. demo/).
-# Files under python/ resolve to python/pyproject.toml instead, which is the
-# source of truth for the server itself; keep line-length in sync with it.
+# Config for the remaining Python files in the repo (e.g. demo/video_gen/).
+# The MCP server itself is TypeScript; there is no other Python source tree.
 target-version = "py313"
 line-length = 120
 

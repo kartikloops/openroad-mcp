@@ -5,7 +5,7 @@ This roadmap describes the development path from v0.6 to v1.0 and beyond.
 ## Current Status: v0.6.x — TypeScript-primary
 
 The npm distribution (`npx openroad-mcp`) is the actively maintained release. The Python/PyPI
-distribution is deprecated and will be removed from the repository in a future release.
+distribution was deprecated and has been removed from the repository.
 
 ### What ships today
 
