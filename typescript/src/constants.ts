@@ -48,3 +48,12 @@ export const PTY_TERM = "dumb";
  * Sending LF can leave the command sitting unsubmitted in the edit buffer.
  */
 export const PTY_LINE_TERMINATOR = "\r";
+
+/**
+ * Budget for the startup handshake. This has to cover the whole cold start --
+ * loading a large OpenROAD binary and reaching its prompt -- not just the probe
+ * round-trip, because spawning does not wait for readiness. Generous on
+ * purpose: the handshake exists to catch a session that will never respond, and
+ * failing a slow-but-healthy start would be worse than the bug it prevents.
+ */
+export const SESSION_HANDSHAKE_TIMEOUT_MS = 60_000;
