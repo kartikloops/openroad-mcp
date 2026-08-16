@@ -39,6 +39,15 @@ const SENTINEL_COMMAND = (nonce: string): string => `puts "[join {ORMCP DONE ${n
 /** Matches any sentinel, including a stale one left by a timed-out command. */
 const ANY_SENTINEL_LINE = /ORMCP[-\s]DONE[-\s][0-9a-z]+/i;
 
+/**
+ * Startup probe. Uses the same runtime-assembly trick as the sentinel for the
+ * same reason: a probe whose token appears verbatim in its own source would be
+ * satisfied by the PTY's echo, so a session that echoes every keystroke but
+ * executes nothing -- precisely the failure this guards against -- would pass.
+ */
+const PROBE_COMMAND = `puts "[join {ORMCP READY OK} -]"`;
+const PROBE_TOKEN = "ORMCP-READY-OK";
+
 /** Liveness re-check cadence while blocked waiting for the sentinel. Bounded so
  * a process that dies without emitting output is noticed promptly rather than
  * at the full command timeout. */
@@ -234,7 +243,10 @@ export class InteractiveSession {
    * Used for the internal completion sentinel, which is bookkeeping rather
    * than a user command and must not appear in the audit trail. */
   private _enqueueRaw(command: string): void {
-    this._inputQueue.push(command.replace(/[\r\n]+$/, "") + PTY_LINE_TERMINATOR);
+    // Every embedded newline is a line the editor has to accept, not just the
+    // final one, so normalise all of them rather than only the terminator.
+    const line = command.replace(/\r?\n/g, PTY_LINE_TERMINATOR).replace(/\r+$/, "");
+    this._inputQueue.push(line + PTY_LINE_TERMINATOR);
     const waiters = this._inputWaiters.splice(0);
     for (const w of waiters) w();
   }
@@ -249,12 +261,13 @@ export class InteractiveSession {
    * results that were never computed.
    */
   async verifyResponsive(timeoutMs = 15000): Promise<void> {
-    const result = await this.runCommand("puts ORMCP_READY", timeoutMs);
-    if (!result.output.includes("ORMCP_READY")) {
+    const result = await this.runCommand(PROBE_COMMAND, timeoutMs);
+    if (!result.output.includes(PROBE_TOKEN)) {
       throw new SessionError(
         `Session ${this.sessionId} started but is not executing commands: the OpenROAD ` +
           `process is alive yet never ran a probe command within ${timeoutMs}ms. This usually ` +
           `means its interactive line editor is not accepting input. ` +
+          `Probe error: ${result.error ?? "none"}. ` +
           `Probe returned: ${JSON.stringify(result.output.slice(-200))}`,
         this.sessionId,
       );
@@ -297,11 +310,15 @@ export class InteractiveSession {
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
 
-    let error = this._detectErrors(output) ?? null;
-    if (error === null && timedOut) {
+    // An incomplete result outranks anything matched inside it: a command that
+    // printed "Error:" and then kept running must not look like it finished.
+    let error: string | null;
+    if (timedOut) {
       error = `CommandTimeout: command did not complete within ${timeoutMs}ms`;
-    } else if (error === null && died) {
+    } else if (died) {
       error = "SessionTerminated: process exited before the command completed";
+    } else {
+      error = this._detectErrors(output) ?? null;
     }
 
     return {

@@ -142,6 +142,22 @@ describe("InteractiveSession", () => {
       expect(written[1]).toBe("with newline\r");
     });
 
+    it("converts embedded newlines to carriage returns in a multi-line command", async () => {
+      await session.start(["openroad", "-no_init"]);
+      (mockPty.isProcessAlive as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+      // Each inner line has to be accepted by the editor too, so an LF left in
+      // the middle would strand everything after it in the edit buffer.
+      await session.sendCommand("set a 1\nset b 2");
+
+      await vi.waitFor(() => {
+        expect(mockPty.writeInput).toHaveBeenCalledTimes(1);
+      });
+      expect((mockPty.writeInput as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe(
+        "set a 1\rset b 2\r",
+      );
+    });
+
     it("throws SessionTerminatedError on terminated session", async () => {
       session.state = SessionState.TERMINATED;
       await expect(session.sendCommand("test")).rejects.toThrow(SessionTerminatedError);
@@ -386,22 +402,32 @@ describe("InteractiveSession", () => {
     });
 
     it("verifyResponsive rejects a session whose line editor never accepts input", async () => {
-      // The VM failure: the process is alive and echoes every keystroke, but
-      // the line is never submitted, so nothing ever executes.
+      // The VM failure: the process is alive and echoes every submitted line
+      // back cleanly, but never runs it. The echo alone must not satisfy the
+      // probe, which is why the probe token is assembled at runtime.
       (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
-        void session.outputBuffer.append(data.replace(/\r$/, ""));
+        void session.outputBuffer.append(data.replace(/\r$/, "\r\n"));
       });
 
-      await expect(session.verifyResponsive(500)).rejects.toThrow(/not executing commands/);
+      await expect(session.verifyResponsive(600)).rejects.toThrow(/not executing commands/);
     });
 
     it("verifyResponsive accepts a healthy session without polluting the audit trail", async () => {
-      wirePty({ thinkMs: 10, output: "ORMCP_READY\r\n" });
+      wirePty({ thinkMs: 10, output: "ORMCP-READY-OK\r\n" });
 
       await session.verifyResponsive(2000);
 
       expect(session.getCommandHistory()).toHaveLength(0);
       expect(session.commandCount).toBe(0);
+    });
+
+    it("reports a timeout even when the partial output contains an error pattern", async () => {
+      wirePty({ thinkMs: 10, output: "Error: something went wrong\r\n", emitSentinel: false });
+
+      const result = await session.runCommand("long_running_thing", 400);
+
+      // A truncated result must not be presented as a completed, failed one.
+      expect(result.error).toMatch(/CommandTimeout/);
     });
 
     it("still surfaces OpenROAD errors detected in the output", async () => {
