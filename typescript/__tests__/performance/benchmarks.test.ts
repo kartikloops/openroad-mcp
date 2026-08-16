@@ -14,8 +14,7 @@ interface MockSession {
   checkAlive: Mock;
   start: Mock;
   verifyResponsive: Mock;
-  sendCommand: Mock;
-  readOutput: Mock;
+  runCommand: Mock;
   getInfo: Mock;
   getDetailedMetrics: Mock;
   getCommandHistory: Mock;
@@ -45,8 +44,7 @@ function makeMockSession(sessionId: string): MockSession {
     checkAlive: vi.fn().mockReturnValue(true),
     start: vi.fn().mockResolvedValue(undefined),
     verifyResponsive: vi.fn().mockResolvedValue(undefined),
-    sendCommand: vi.fn().mockResolvedValue(undefined),
-    readOutput: vi.fn().mockResolvedValue({
+    runCommand: vi.fn().mockResolvedValue({
       output: "ok",
       sessionId,
       timestamp: new Date().toISOString(),
@@ -247,7 +245,7 @@ describe("Stress Tests", () => {
     }
 
     const session = created[0]!;
-    expect(session.readOutput.mock.calls.length).toBe(TOTAL);
+    expect(session.runCommand.mock.calls.length).toBe(TOTAL);
     expect(session.checkAlive()).toBe(true);
   });
 
