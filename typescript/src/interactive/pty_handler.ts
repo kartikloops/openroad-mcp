@@ -6,6 +6,14 @@ import type { Settings } from "../config/settings.js";
 import { PTY_COLS, PTY_ROWS, PTY_TERM } from "../constants.js";
 import { PTYError } from "./models.js";
 
+/** Terminal geometry must be a positive whole number of cells. Anything else --
+ * blank, non-numeric, zero or negative -- is not a usable size, so fall back
+ * rather than hand node-pty a dimension it cannot honour. */
+function positiveIntOr(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 export class PtyHandler {
   private _ptyProcess: IPty | null = null;
   private _alive = false;
@@ -83,8 +91,8 @@ export class PtyHandler {
 
       this._ptyProcess = spawn(command[0]!, command.slice(1), {
         name: processEnv.TERM ?? PTY_TERM,
-        cols: Number(processEnv.COLUMNS) || PTY_COLS,
-        rows: Number(processEnv.LINES) || PTY_ROWS,
+        cols: positiveIntOr(processEnv.COLUMNS, PTY_COLS),
+        rows: positiveIntOr(processEnv.LINES, PTY_ROWS),
         cwd: cwd ?? process.cwd(),
         env: processEnv,
       });

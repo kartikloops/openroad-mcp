@@ -97,6 +97,20 @@ describe("PtyHandler", () => {
       expect(opts.cols).toBe(120);
     });
 
+    it.each([
+      ["zero", "0"],
+      ["negative", "-5"],
+      ["fractional", "80.5"],
+      ["non-numeric", "wide"],
+      ["blank", ""],
+    ])("falls back to the default geometry for a %s COLUMNS", async (_label, columns) => {
+      // node-pty cannot honour any of these as a cell count, so a bad value
+      // must not reach it -- least of all a negative, which is truthy.
+      await handler.createSession(["echo", "hello"], { COLUMNS: columns });
+
+      expect(vi.mocked(spawn).mock.calls[0]![2]!.cols).toBe(4096);
+    });
+
     it("marks process as alive after createSession", async () => {
       await handler.createSession(["echo"]);
       expect(handler.isProcessAlive()).toBe(true);
