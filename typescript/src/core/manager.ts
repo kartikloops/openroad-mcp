@@ -73,7 +73,16 @@ export class OpenROADManager {
         // can't silently drop all output.
         const bufferSize = opts.bufferSize && opts.bufferSize > 0 ? opts.bufferSize : this.defaultBufferSize;
         const session = new InteractiveSession(sessionId, bufferSize);
-        await session.start(opts.command, opts.env, opts.cwd);
+        try {
+          await session.start(opts.command, opts.env, opts.cwd);
+          // Never hand out a session that cannot run commands.
+          await session.verifyResponsive();
+        } catch (e) {
+          // start() may have spawned a process before the failure; without this
+          // an unresponsive session leaves an orphaned OpenROAD behind.
+          await session.terminate(true).catch(() => { /* best effort */ });
+          throw e;
+        }
 
         this.sessions.set(sessionId, session);
         this.logger.info(`Created session ${sessionId}, total sessions: ${this.sessions.size}`);

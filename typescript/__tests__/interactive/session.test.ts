@@ -385,6 +385,25 @@ describe("InteractiveSession", () => {
       expect(result.output).not.toContain("staleabc123");
     });
 
+    it("verifyResponsive rejects a session whose line editor never accepts input", async () => {
+      // The VM failure: the process is alive and echoes every keystroke, but
+      // the line is never submitted, so nothing ever executes.
+      (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+        void session.outputBuffer.append(data.replace(/\r$/, ""));
+      });
+
+      await expect(session.verifyResponsive(500)).rejects.toThrow(/not executing commands/);
+    });
+
+    it("verifyResponsive accepts a healthy session without polluting the audit trail", async () => {
+      wirePty({ thinkMs: 10, output: "ORMCP_READY\r\n" });
+
+      await session.verifyResponsive(2000);
+
+      expect(session.getCommandHistory()).toHaveLength(0);
+      expect(session.commandCount).toBe(0);
+    });
+
     it("still surfaces OpenROAD errors detected in the output", async () => {
       wirePty({ thinkMs: 10, output: 'invalid command name "bogus_cmd"\r\n' });
 

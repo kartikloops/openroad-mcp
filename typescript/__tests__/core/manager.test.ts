@@ -19,6 +19,7 @@ interface MockSession {
   terminatedAt: Date | null;
   checkAlive: Mock;
   start: Mock;
+  verifyResponsive: Mock;
   sendCommand: Mock;
   readOutput: Mock;
   runCommand: Mock;
@@ -54,6 +55,7 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
     terminatedAt: null,
     checkAlive: vi.fn().mockReturnValue(alive),
     start: vi.fn().mockResolvedValue(undefined),
+    verifyResponsive: vi.fn().mockResolvedValue(undefined),
     sendCommand: vi.fn().mockResolvedValue(undefined),
     readOutput: vi.fn().mockResolvedValue({
       output: "ok",

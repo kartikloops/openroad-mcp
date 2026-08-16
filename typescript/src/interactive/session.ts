@@ -240,6 +240,32 @@ export class InteractiveSession {
   }
 
   /**
+   * Prove the session can actually execute a command before it is handed out.
+   *
+   * A PTY-attached OpenROAD can come up healthy-looking -- process alive,
+   * prompt printed -- while its line editor never accepts the lines we write,
+   * so every command silently does nothing. Failing here turns that into an
+   * immediate, obvious session-creation error instead of a run's worth of
+   * results that were never computed.
+   */
+  async verifyResponsive(timeoutMs = 15000): Promise<void> {
+    const result = await this.runCommand("puts ORMCP_READY", timeoutMs);
+    if (!result.output.includes("ORMCP_READY")) {
+      throw new SessionError(
+        `Session ${this.sessionId} started but is not executing commands: the OpenROAD ` +
+          `process is alive yet never ran a probe command within ${timeoutMs}ms. This usually ` +
+          `means its interactive line editor is not accepting input. ` +
+          `Probe returned: ${JSON.stringify(result.output.slice(-200))}`,
+        this.sessionId,
+      );
+    }
+    // The probe is plumbing, not user activity; keep it out of the audit trail.
+    this.commandHistory.length = 0;
+    this.commandCount = 0;
+    this.totalCommandsExecuted = 0;
+  }
+
+  /**
    * Send a command and read until it actually completes.
    *
    * Prefer this over sendCommand + readOutput: readOutput cannot tell a
