@@ -25,3 +25,26 @@ export const SLOW_OPERATION_THRESHOLD = 1.0;
 // Bounds memory on long-lived sessions; oldest entries are dropped when
 // exceeded.
 export const MAX_COMMAND_HISTORY = 1000;
+
+/**
+ * PTY geometry and terminal type.
+ *
+ * OpenROAD runs a readline-style line editor when stdin is a TTY. At a narrow
+ * width that editor horizontally scrolls long commands, redrawing the whole
+ * visible window once per character -- a single 75-character read_liberty turns
+ * into a cascade of near-identical lines that swamps the real output. A width
+ * far beyond any realistic command avoids the redraw entirely.
+ *
+ * TERM=dumb tells readline to skip the fancy editing layer (bracketed paste,
+ * horizontal scroll, cursor addressing) that we neither need nor can interpret.
+ */
+export const PTY_COLS = 4096;
+export const PTY_ROWS = 24;
+export const PTY_TERM = "dumb";
+
+/**
+ * Line terminator written after each command. A real Enter key sends carriage
+ * return, and a line editor in raw mode binds CR -- not LF -- to accept-line.
+ * Sending LF can leave the command sitting unsubmitted in the edit buffer.
+ */
+export const PTY_LINE_TERMINATOR = "\r";

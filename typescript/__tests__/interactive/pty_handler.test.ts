@@ -79,9 +79,22 @@ describe("PtyHandler", () => {
       const opts = call[2]!;
       expect(opts.cwd).toBe("/tmp");
       expect((opts.env as Record<string, string>)["TEST"]).toBe("value");
-      expect((opts.env as Record<string, string>)["TERM"]).toBe("xterm-256color");
-      expect((opts.env as Record<string, string>)["COLUMNS"]).toBe("80");
+      // A plain terminal and a width beyond any realistic command keep
+      // OpenROAD's line editor from horizontally scrolling long input, which
+      // would otherwise redraw the whole line once per character.
+      expect((opts.env as Record<string, string>)["TERM"]).toBe("dumb");
+      expect((opts.env as Record<string, string>)["COLUMNS"]).toBe("4096");
       expect((opts.env as Record<string, string>)["LINES"]).toBe("24");
+      expect(opts.cols).toBe(4096);
+    });
+
+    it("lets an explicit caller env override the terminal defaults", async () => {
+      await handler.createSession(["echo", "hello"], { TERM: "vt100", COLUMNS: "120" });
+
+      const opts = vi.mocked(spawn).mock.calls[0]![2]!;
+      expect((opts.env as Record<string, string>)["TERM"]).toBe("vt100");
+      expect(opts.name).toBe("vt100");
+      expect(opts.cols).toBe(120);
     });
 
     it("marks process as alive after createSession", async () => {

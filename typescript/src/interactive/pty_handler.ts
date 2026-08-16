@@ -3,6 +3,7 @@ import { spawn } from "node-pty";
 import type { IPty, IDisposable } from "node-pty";
 import { getSettings } from "../config/settings.js";
 import type { Settings } from "../config/settings.js";
+import { PTY_COLS, PTY_ROWS, PTY_TERM } from "../constants.js";
 import { PTYError } from "./models.js";
 
 export class PtyHandler {
@@ -68,20 +69,22 @@ export class PtyHandler {
     try {
       this.validateCommand(command);
 
+      // Terminal settings come first so an explicit caller env can override
+      // them; previously they were applied last and silently won.
       const processEnv: Record<string, string> = {
         ...Object.fromEntries(
           Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined),
         ),
+        TERM: PTY_TERM,
+        COLUMNS: String(PTY_COLS),
+        LINES: String(PTY_ROWS),
         ...env,
-        TERM: "xterm-256color",
-        COLUMNS: "80",
-        LINES: "24",
       };
 
       this._ptyProcess = spawn(command[0]!, command.slice(1), {
-        name: "xterm-256color",
-        cols: 80,
-        rows: 24,
+        name: processEnv.TERM ?? PTY_TERM,
+        cols: Number(processEnv.COLUMNS) || PTY_COLS,
+        rows: Number(processEnv.LINES) || PTY_ROWS,
         cwd: cwd ?? process.cwd(),
         env: processEnv,
       });
