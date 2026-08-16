@@ -199,8 +199,9 @@ under the base directory. A symlink that points outside the base is caught here.
 
 **Additional constraints:**
 
-- Only `.webp` files are served — the listing skips all other extensions and `read_report_image`
-  rejects any `image_name` that does not end in `.webp`.
+- Only report-image extensions are served — `.webp`, `.png`, and the doubled `.webp.png` form
+  some ORFS builds emit. The listing skips everything else and `read_report_image` rejects any
+  `image_name` that does not end in one of them.
 - Symlinks are skipped during directory listing.
 - On-disk file size is capped at 50 MB before any decoding.
 - The base64-encoded payload is targeted at 15 KB; larger images are downscaled using sharp

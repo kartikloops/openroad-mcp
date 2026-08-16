@@ -111,6 +111,19 @@ export function isReportImage(filename: string): boolean {
   return IMAGE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext));
 }
 
+/**
+ * Format of the bytes actually returned, which is not always WebP.
+ *
+ * Only the compression path re-encodes; images small enough to send as-is are
+ * returned byte-for-byte from disk. Since `.webp.png` files really are PNG,
+ * reporting a blanket "webp" would misdescribe the payload to any consumer that
+ * trusts this field instead of sniffing the header.
+ */
+function imageFormat(filename: string, compressionApplied: boolean): string {
+  if (compressionApplied) return "webp";
+  return filename.toLowerCase().endsWith(".webp") ? "webp" : "png";
+}
+
 /** Strip the report-image extension, including the doubled `.webp.png` form. */
 function stripImageExtension(filename: string): string {
   const lower = filename.toLowerCase();
@@ -286,7 +299,7 @@ export class ListReportImagesTool extends BaseTool {
         try {
           const others = fs
             .readdirSync(runPath, { withFileTypes: true })
-            .filter((e) => e.isFile() && /\.(png|jpe?g|gif|svg|webp)/i.test(e.name))
+            .filter((e) => e.isFile() && /\.(png|jpe?g|gif|svg|webp)$/i.test(e.name))
             .map((e) => e.name);
           if (others.length > 0) {
             hint =
@@ -474,7 +487,7 @@ export class ReadReportImageTool extends BaseTool {
 
       const metadata = ImageMetadata.parse({
         filename: imageName,
-        format: "webp",
+        format: imageFormat(imageName, r.compressionApplied),
         sizeBytes: r.compressedSize,
         width: r.width,
         height: r.height,

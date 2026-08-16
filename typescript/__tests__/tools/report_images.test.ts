@@ -77,6 +77,16 @@ async function writeRealWebp(filePath: string, width: number, height: number): P
   fs.writeFileSync(filePath, buffer);
 }
 
+/** Writes a real PNG, for the `.webp.png` files some ORFS builds emit. */
+async function writeRealPng(filePath: string, width: number, height: number): Promise<void> {
+  const buffer = await sharp({
+    create: { width, height, channels: 3, background: { r: 10, g: 20, b: 30 } },
+  })
+    .png()
+    .toBuffer();
+  fs.writeFileSync(filePath, buffer);
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openroad-test-"));
 });
@@ -347,6 +357,27 @@ describe("ReadReportImageTool", () => {
     expect(result.metadata.filename).toBe("cts_clk.webp");
     expect(result.metadata.stage).toBe("cts");
     expect(result.metadata.type).toBe("clock_visualization");
+    expect(result.metadata.format).toBe("webp");
+  });
+
+  it("reports the real format of a .webp.png, which is returned as PNG bytes", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    // Small enough to skip compression, so the bytes are the file's own.
+    await writeRealPng(path.join(runPath, "final_all.webp.png"), 4, 4);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+
+    const result = JSON.parse(await tool.execute("nangate45", "gcd", "run-123", "final_all.webp.png"));
+
+    // The declared format has to match the bytes: a consumer that trusts it
+    // instead of sniffing the header would otherwise fail to decode.
+    const decoded = Buffer.from(result.image_data, "base64");
+    expect(decoded.subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    expect(result.metadata.format).toBe("png");
   });
 
   it("returns FileTooLarge error when image exceeds 50 MB", async () => {
