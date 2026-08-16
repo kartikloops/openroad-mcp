@@ -92,8 +92,7 @@ export class OpenROADManager {
     // instant timeout.
     const actualTimeout = timeoutMs && timeoutMs > 0 ? timeoutMs : this.defaultTimeoutMs;
 
-    await session.sendCommand(command);
-    return session.readOutput(actualTimeout);
+    return session.runCommand(command, actualTimeout);
   }
 
   async getSessionInfo(sessionId: string): Promise<InteractiveSessionInfo> {

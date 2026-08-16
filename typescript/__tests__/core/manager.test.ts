@@ -21,6 +21,7 @@ interface MockSession {
   start: Mock;
   sendCommand: Mock;
   readOutput: Mock;
+  runCommand: Mock;
   getInfo: Mock;
   getDetailedMetrics: Mock;
   getCommandHistory: Mock;
@@ -55,6 +56,15 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
     start: vi.fn().mockResolvedValue(undefined),
     sendCommand: vi.fn().mockResolvedValue(undefined),
     readOutput: vi.fn().mockResolvedValue({
+      output: "ok",
+      sessionId,
+      timestamp: new Date().toISOString(),
+      executionTime: 0.01,
+      commandCount: 1,
+      bufferSize: 0,
+      error: null,
+    }),
+    runCommand: vi.fn().mockResolvedValue({
       output: "ok",
       sessionId,
       timestamp: new Date().toISOString(),
@@ -155,11 +165,13 @@ describe("OpenROADManager", () => {
   });
 
   describe("executeCommand", () => {
-    it("delegates to sendCommand then readOutput", async () => {
+    it("delegates to runCommand so completion is actually detected", async () => {
       await manager.createSession({ sessionId: "s1" });
       const result = await manager.executeCommand("s1", "report_wns");
-      expect(created[0]!.sendCommand).toHaveBeenCalledWith("report_wns");
-      expect(created[0]!.readOutput).toHaveBeenCalledOnce();
+      expect(created[0]!.runCommand).toHaveBeenCalledWith("report_wns", expect.any(Number));
+      // readOutput cannot tell a finished command from a quiet one, so the
+      // command path must never fall back to it.
+      expect(created[0]!.readOutput).not.toHaveBeenCalled();
       expect(result.output).toBe("ok");
     });
 
@@ -172,8 +184,8 @@ describe("OpenROADManager", () => {
     it("falls back to the default timeout when timeoutMs is 0", async () => {
       await manager.createSession({ sessionId: "s1" });
       await manager.executeCommand("s1", "report_wns", 0);
-      // 0 must not be forwarded as an instant timeout; readOutput gets the default.
-      const timeoutArg = created[0]!.readOutput.mock.calls[0]![0] as number;
+      // 0 must not be forwarded as an instant timeout; runCommand gets the default.
+      const timeoutArg = created[0]!.runCommand.mock.calls[0]![1] as number;
       expect(timeoutArg).toBeGreaterThan(0);
     });
   });
@@ -323,7 +335,7 @@ describe("OpenROADManager", () => {
     it("forwards an explicit positive timeoutMs as-is", async () => {
       await manager.createSession({ sessionId: "s1" });
       await manager.executeCommand("s1", "report_wns", 5000);
-      expect(created[0]!.readOutput).toHaveBeenCalledWith(5000);
+      expect(created[0]!.runCommand).toHaveBeenCalledWith("report_wns", 5000);
     });
   });
 
