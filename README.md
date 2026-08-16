@@ -43,27 +43,9 @@ To use this MCP server, you need the server runtime, plus the underlying OpenROA
 
 For platform-specific Node.js and C++ toolchain setup instructions, see the **[Cross-Platform Build Guide](docs/CROSS_PLATFORM.md)**.
 
-Before configuring your MCP client, you must provide the server with your local paths to OpenROAD and ORFS.
+You do **not** need to clone this repo or pass path environment variables in the common case. The published `npx` package does not read a `.env` file.
 
-### 1. Find Your Paths
-Run these commands in your terminal to locate the necessary directories:
-
-```bash
-# Get your OpenROAD binary directory:
-dirname $(which openroad)
-
-# Check for the default ORFS flow directory:
-ls ~/OpenROAD-flow-scripts/flow
-# (If not found, search with: find ~ -maxdepth 4 -type d -name flow -path "*/OpenROAD-flow-scripts/*" 2>/dev/null)
-```
-
-### 2. Set Up Environment Variables
-Copy the example environment file and fill in the paths you just found:
-
-```bash
-cp .env.example .env
-```
-Edit `.env` to ensure `PATH` includes your OpenROAD binary directory, and `ORFS_FLOW_PATH` points to your ORFS checkout. Pass these values into your MCP client's configuration via the `env` block.
+On startup the server inherits the MCP client's environment, then fills `PATH` the same way `which openroad` would: current `PATH`, then your login-shell `PATH`, then common install locations (`/opt/homebrew/bin`, conda, local OpenROAD builds). `ORFS_FLOW_PATH` defaults to `~/OpenROAD-flow-scripts/flow`, and is also detected when ORFS sits next to the `openroad` binary.
 
 ## Supported MCP Clients
 
@@ -76,16 +58,27 @@ Here is the standard base configuration used across most clients:
 }
 ```
 
-Find your specific client below for the exact configuration snippet and file location. 
-
-*(Note: If your client supports environment variables in the config, inject your `PATH` and `ORFS_FLOW_PATH` directly in the snippet).*
+Find your specific client below for the exact configuration snippet and file location.
 
 <details><summary><b>Claude Code</b></summary>
 
 ```bash
 claude mcp add --transport stdio openroad-mcp -- npx -y openroad-mcp
 ```
-Or add the standard config to `.claude/settings.json`.
+
+Or add the standard config to `.mcp.json` / `.claude/settings.json`.
+
+If a GUI-launched client still cannot find `openroad`, pass an override. Use `command -v` so you do not hard-code paths:
+
+```bash
+claude mcp add \
+  --env PATH="$(dirname "$(command -v openroad)"):${PATH}" \
+  --env ORFS_FLOW_PATH="${HOME}/OpenROAD-flow-scripts/flow" \
+  --transport stdio openroad-mcp \
+  -- npx -y openroad-mcp
+```
+
+Put `--transport` between `--env` and the server name so the CLI does not treat the name as another `KEY=value` pair.
 </details>
 
 <details><summary><b>Claude Desktop</b></summary>
@@ -184,15 +177,17 @@ Once configured, your AI assistant will have access to the following tools. For 
 ## Troubleshooting
 
 - **The server fails to start**: Ensure you have Node.js 22+. Older versions will fail.
-- **Session creation fails**: Confirm `openroad` is on your `PATH`. The server spawns it by name; if it's missing, session creation (not startup) will fail.
+- **Session creation fails**: Confirm `command -v openroad` works in a terminal. The server inherits PATH and searches common install locations; if your prefix is unusual, pass `PATH` with `--env` as shown in the Claude Code section.
 - **Commands rejected with CommandBlocked**: You sent a state-modifying command to `interactive_openroad_query`. Use `interactive_openroad_exec` instead.
-- **Report images not found**: Make sure `ORFS_FLOW_PATH` points to your ORFS `flow/` directory.
+- **Report images not found**: The server defaults to `~/OpenROAD-flow-scripts/flow`. If ORFS lives elsewhere, set `ORFS_FLOW_PATH` in the MCP client's `env` block (not a `.env` file).
 
 To get more detail, set `LOG_LEVEL=DEBUG` in the server's environment.
 
 ## Development
 
-Clone the repository and run:
+Clone the repository. `.env.example` is a local-dev reference only; copy it to `.env` if you use direnv or similar. The server still reads `process.env` (the MCP client's `env` block), not the file.
+
+Then run:
 ```bash
 cd typescript
 npm install

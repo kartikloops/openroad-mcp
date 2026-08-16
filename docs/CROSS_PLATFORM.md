@@ -67,7 +67,7 @@ xcode-select --install
 
 | Issue | Workaround |
 |-------|------------|
-| OpenROAD is not on `PATH` after Homebrew install | Add `/opt/homebrew/bin` to your shell's `PATH`, or set `OPENROAD_ALLOWED_COMMANDS=openroad` and use the full path in your session config. |
+| OpenROAD is not on `PATH` after Homebrew install | The server prepends `/opt/homebrew/bin` automatically. If session creation still fails, pass `PATH="$(dirname "$(command -v openroad)"):${PATH}"` in the MCP client `env` block. |
 | `node-pty` rebuild fails after a Node upgrade | `cd typescript && npm rebuild` |
 | `sharp` fails with "dyld: Library not loaded" | `cd typescript && npm rebuild --update-binary` |
 
