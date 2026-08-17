@@ -761,6 +761,27 @@ describe("InteractiveSession", () => {
       expect(result.error).toMatch(/Fatal error/);
     });
 
+    it("detects OpenROAD [ERROR CODE-NNNN] lines, which have no colon", async () => {
+      // The dry-run failure: repair_timing printed [ERROR RSZ-0089] and the
+      // tool still returned error: null because only "Error:" / "ERROR:" were
+      // recognised. Warnings must stay non-errors.
+      await session.outputBuffer.append(
+        "[WARNING EST-0027] no estimated parasitics. Using wire load models.\n" +
+          "[ERROR RSZ-0089] Could not find a resistance value for any corner. Cannot evaluate max wire length for buffer.\n",
+      );
+      const result = await session.readOutput(100);
+      expect(result.error).toMatch(/OpenROAD RSZ-0089/);
+      expect(result.error).toMatch(/resistance value/);
+    });
+
+    it("does not treat an OpenROAD [WARNING] line as a command failure", async () => {
+      await session.outputBuffer.append(
+        "[WARNING EST-0027] no estimated parasitics. Using wire load models.\n",
+      );
+      const result = await session.readOutput(100);
+      expect(result.error).toBeNull();
+    });
+
     it("detects invalid command name pattern", async () => {
       await session.outputBuffer.append('invalid command name "foo_bar"\n');
       const result = await session.readOutput(100);

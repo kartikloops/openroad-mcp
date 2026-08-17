@@ -67,6 +67,11 @@ const ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/Error: net ([^\s]+) not found/i, "Net not found: {0}"],
   [/Error: clock ([^\s]+) not found/i, "Clock not found: {0}"],
   [/Error: no clocks defined/i, "No clocks defined"],
+  // OpenROAD's native log format: [ERROR RSZ-0089] message. Must precede the
+  // generic "Error:" rules — those look for a colon, so this form was being
+  // returned as success with the failure sitting in the output text.
+  [/\[ERROR\s+([A-Z]+-\d+)\]\s*([^\r\n]+)/, "OpenROAD {0}: {1}"],
+  [/\[FATAL\s+([A-Z]+-\d+)\]\s*([^\r\n]+)/, "OpenROAD fatal {0}: {1}"],
   [/Error: (.+?)(?:\r?\n|$)/im, "Error: {0}"],
   [/ERROR: (.+?)(?:\r?\n|$)/m, "Error: {0}"],
   [/FATAL: (.+?)(?:\r?\n|$)/m, "Fatal error: {0}"],
@@ -592,10 +597,11 @@ export class InteractiveSession {
     for (const [pattern, template] of ERROR_PATTERNS) {
       const match = pattern.exec(output);
       if (match) {
-        const capture = match[1];
         // Function replacement so `$&`/`$1`/`$$` inside the captured error text
         // are inserted literally, not reinterpreted as replacement patterns.
-        return capture ? template.replace("{0}", () => capture.trim()) : template;
+        return template
+          .replace("{0}", () => (match[1] ?? "").trim())
+          .replace("{1}", () => (match[2] ?? "").trim());
       }
     }
 
