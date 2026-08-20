@@ -22,7 +22,7 @@ With this MCP server, your AI assistant can:
 
 ![OpenROAD MCP Demo](demo/video_gen/demo-quick.gif)
 
-[Watch full demo video](https://youtu.be/UQM1otOl17s)
+[Watch full demo video](https://youtu.be/1J-Qtto-ssU)
 
 ## Requirements & Installation
 
