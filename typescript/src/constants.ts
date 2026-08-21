@@ -51,9 +51,10 @@ export const PTY_LINE_TERMINATOR = "\r";
 
 /**
  * Budget for the startup handshake. This has to cover the whole cold start --
- * loading a large OpenROAD binary and reaching its prompt -- not just the probe
- * round-trip, because spawning does not wait for readiness. Generous on
- * purpose: the handshake exists to catch a session that will never respond, and
- * failing a slow-but-healthy start would be worse than the bug it prevents.
+ * loading OpenROAD and reaching its prompt -- not just the probe round-trip,
+ * because spawning does not wait for readiness. OpenROAD is native C++ and a
+ * healthy start is sub-second locally, so this is a few seconds of margin for
+ * a slow disk/container, not an expected duration: the handshake exists to
+ * catch a session that will never respond, not to tolerate a slow one.
  */
-export const SESSION_HANDSHAKE_TIMEOUT_MS = 60_000;
+export const SESSION_HANDSHAKE_TIMEOUT_MS = 10_000;

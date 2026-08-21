@@ -42,8 +42,8 @@ export class OpenROADManager {
   private readonly defaultBufferSize: number;
   // Covers the whole cold start, not just the probe round-trip: start() only
   // spawns, so OpenROAD still has to load and reach its prompt inside this
-  // budget. A container on a cold filesystem is comfortably slower than the
-  // handshake's own default.
+  // budget. See SESSION_HANDSHAKE_TIMEOUT_MS for why this is a few seconds of
+  // margin, not a generous allowance.
   private readonly handshakeTimeoutMs: number = SESSION_HANDSHAKE_TIMEOUT_MS;
 
   constructor(maxSessions?: number) {
