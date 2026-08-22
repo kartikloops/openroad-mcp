@@ -163,12 +163,14 @@ All variables are read at startup by [`typescript/src/config/settings.ts`](../ty
 | `OPENROAD_ALLOWED_COMMANDS` | string (comma-separated) | `openroad` | PTY spawn executable allowlist |
 | `OPENROAD_ENABLE_COMMAND_VALIDATION` | bool | `true` | Enables/disables `PtyHandler.validateCommand` |
 | `OPENROAD_WHITELIST_ENABLED` | bool | `true` | Enables/disables the Tcl command whitelist |
-| `ORFS_FLOW_PATH` | path | `~/OpenROAD-flow-scripts/flow` | Root for ORFS reports; tilde-expanded at runtime |
+| `ORFS_FLOW_PATH` | path | `~/OpenROAD-flow-scripts/flow` (auto-detected if unset) | Root for ORFS reports; tilde-expanded at runtime |
 | `LOG_LEVEL` | string | `INFO` | Root pino logger level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 | `LOG_FORMAT` | string | (N/A) | Unused; logging uses pino with a fixed JSON format |
 
 CLI flags `--verbose` and `--log-level` override `LOG_LEVEL` after the settings are initialised.
 No other CLI flag overrides a Settings field.
+
+`PATH` is not a Settings field. At startup the server inherits the client's `PATH`, then (only if `openroad` is not already found) merges the login-shell `PATH` and common install locations. An explicit `PATH` in the MCP client `env` block still wins when it already contains `openroad`.
 
 ---
 
@@ -199,8 +201,9 @@ under the base directory. A symlink that points outside the base is caught here.
 
 **Additional constraints:**
 
-- Only `.webp` files are served — the listing skips all other extensions and `read_report_image`
-  rejects any `image_name` that does not end in `.webp`.
+- Only report-image extensions are served — `.webp`, `.png`, and the doubled `.webp.png` form
+  some ORFS builds emit. The listing skips everything else and `read_report_image` rejects any
+  `image_name` that does not end in one of them.
 - Symlinks are skipped during directory listing.
 - On-disk file size is capped at 50 MB before any decoding.
 - The base64-encoded payload is targeted at 15 KB; larger images are downscaled using sharp

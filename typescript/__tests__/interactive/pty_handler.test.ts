@@ -79,9 +79,36 @@ describe("PtyHandler", () => {
       const opts = call[2]!;
       expect(opts.cwd).toBe("/tmp");
       expect((opts.env as Record<string, string>)["TEST"]).toBe("value");
-      expect((opts.env as Record<string, string>)["TERM"]).toBe("xterm-256color");
-      expect((opts.env as Record<string, string>)["COLUMNS"]).toBe("80");
+      // A plain terminal and a width beyond any realistic command keep
+      // OpenROAD's line editor from horizontally scrolling long input, which
+      // would otherwise redraw the whole line once per character.
+      expect((opts.env as Record<string, string>)["TERM"]).toBe("dumb");
+      expect((opts.env as Record<string, string>)["COLUMNS"]).toBe("4096");
       expect((opts.env as Record<string, string>)["LINES"]).toBe("24");
+      expect(opts.cols).toBe(4096);
+    });
+
+    it("lets an explicit caller env override the terminal defaults", async () => {
+      await handler.createSession(["echo", "hello"], { TERM: "vt100", COLUMNS: "120" });
+
+      const opts = vi.mocked(spawn).mock.calls[0]![2]!;
+      expect((opts.env as Record<string, string>)["TERM"]).toBe("vt100");
+      expect(opts.name).toBe("vt100");
+      expect(opts.cols).toBe(120);
+    });
+
+    it.each([
+      ["zero", "0"],
+      ["negative", "-5"],
+      ["fractional", "80.5"],
+      ["non-numeric", "wide"],
+      ["blank", ""],
+    ])("falls back to the default geometry for a %s COLUMNS", async (_label, columns) => {
+      // node-pty cannot honour any of these as a cell count, so a bad value
+      // must not reach it -- least of all a negative, which is truthy.
+      await handler.createSession(["echo", "hello"], { COLUMNS: columns });
+
+      expect(vi.mocked(spawn).mock.calls[0]![2]!.cols).toBe(4096);
     });
 
     it("marks process as alive after createSession", async () => {

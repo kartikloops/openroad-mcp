@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { parseCliArgs } from "./config/cli.js";
+import { applyInheritedEnv } from "./config/path_env.js";
 import { initSettings } from "./config/settings.js";
 import { EXIT_CODE_ERROR } from "./constants.js";
 import { ValidationError } from "./exceptions.js";
 
 /**
- * Entry point. The eager work (settings validation, CLI parsing) runs before
- * any module that reads settings or builds a logger is imported.
+ * Entry point. The eager work (PATH inheritance, settings validation, CLI
+ * parsing) runs before any module that reads settings or builds a logger is
+ * imported.
  *
  * This ordering matters and is why `logging` and `server` are dynamic imports:
  * `utils/logging` calls `getSettings()` at module load to seed the root logger,
@@ -17,6 +19,7 @@ import { ValidationError } from "./exceptions.js";
  */
 async function main(): Promise<void> {
   try {
+    applyInheritedEnv();
     initSettings();
   } catch (e) {
     throw new ValidationError(e instanceof Error ? e.message : String(e));

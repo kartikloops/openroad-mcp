@@ -82,7 +82,7 @@ The server reads configuration from environment variables. Key variables:
 |---|---|---|
 | `OPENROAD_MAX_SESSIONS` | `50` | Maximum concurrent sessions |
 | `OPENROAD_COMMAND_TIMEOUT` | `30.0` | Default per-command timeout in seconds |
-| `ORFS_FLOW_PATH` | `~/OpenROAD-flow-scripts/flow` | Path to ORFS flow directory |
+| `ORFS_FLOW_PATH` | `~/OpenROAD-flow-scripts/flow` (auto-detected if unset) | Path to ORFS flow directory |
 | `OPENROAD_WHITELIST_ENABLED` | `true` | Enable Tcl command whitelist |
 
 Full list: [docs/SECURITY.md#environment-variable-reference](https://github.com/The-OpenROAD-Project/openroad-mcp/blob/main/docs/SECURITY.md#environment-variable-reference)

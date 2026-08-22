@@ -19,8 +19,10 @@ interface MockSession {
   terminatedAt: Date | null;
   checkAlive: Mock;
   start: Mock;
+  verifyResponsive: Mock;
   sendCommand: Mock;
   readOutput: Mock;
+  runCommand: Mock;
   getInfo: Mock;
   getDetailedMetrics: Mock;
   getCommandHistory: Mock;
@@ -53,8 +55,18 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
     terminatedAt: null,
     checkAlive: vi.fn().mockReturnValue(alive),
     start: vi.fn().mockResolvedValue(undefined),
+    verifyResponsive: vi.fn().mockResolvedValue(undefined),
     sendCommand: vi.fn().mockResolvedValue(undefined),
     readOutput: vi.fn().mockResolvedValue({
+      output: "ok",
+      sessionId,
+      timestamp: new Date().toISOString(),
+      executionTime: 0.01,
+      commandCount: 1,
+      bufferSize: 0,
+      error: null,
+    }),
+    runCommand: vi.fn().mockResolvedValue({
       output: "ok",
       sessionId,
       timestamp: new Date().toISOString(),
@@ -84,6 +96,25 @@ function makeMockSession(sessionId: string, alive = true): MockSession {
 }
 
 const MockedSession = vi.mocked(InteractiveSession);
+
+/** Park the next session's handshake so a create stays in flight on demand.
+ * Must be a plain function, not an arrow, so `new` still works. */
+function stallNextHandshake(): { handshakeStarted: Promise<void>; release: () => void } {
+  let release!: () => void;
+  let signalStarted!: () => void;
+  const handshakeStarted = new Promise<void>((r) => (signalStarted = r));
+
+  MockedSession.mockImplementationOnce(function (this: unknown, sessionId: string) {
+    const mock = makeMockSession(sessionId);
+    mock.verifyResponsive = vi.fn().mockImplementation(async () => {
+      signalStarted();
+      await new Promise<void>((r) => (release = r));
+    });
+    return mock as unknown as InteractiveSession;
+  } as unknown as (sessionId: string) => InteractiveSession);
+
+  return { handshakeStarted, release: () => release() };
+}
 
 describe("OpenROADManager", () => {
   let manager: OpenROADManager;
@@ -133,6 +164,40 @@ describe("OpenROADManager", () => {
       await expect(limited.createSession({ sessionId: "s2" })).rejects.toThrow(/Maximum session limit/);
     });
 
+    it("does not hold the manager lock across a slow startup handshake", async () => {
+      const { handshakeStarted, release } = stallNextHandshake();
+
+      const slow = manager.createSession({ sessionId: "slow" });
+      await handshakeStarted;
+
+      // A second session stuck in its handshake must not stall unrelated
+      // lifecycle work; before, this awaited the full handshake timeout.
+      await expect(
+        Promise.race([
+          manager.listSessions().then(() => "listed"),
+          new Promise((r) => setTimeout(() => r("blocked"), 1000)),
+        ]),
+      ).resolves.toBe("listed");
+
+      release();
+      await slow;
+    });
+
+    it("counts in-flight reservations towards the session cap", async () => {
+      const limited = new OpenROADManager(1);
+      const { handshakeStarted, release } = stallNextHandshake();
+
+      const first = limited.createSession({ sessionId: "s1" });
+      await handshakeStarted;
+
+      // Startup happens outside the lock now, so the reserved-but-unspawned
+      // slot is the only thing keeping concurrent creates under the cap.
+      await expect(limited.createSession({ sessionId: "s2" })).rejects.toThrow(/Maximum session limit/);
+
+      release();
+      await first;
+    });
+
     it("falls back to the default buffer size when bufferSize is 0", async () => {
       await manager.createSession({ sessionId: "zero", bufferSize: 0 });
       // InteractiveSession is constructed with (sessionId, bufferSize); a 0 must
@@ -155,11 +220,13 @@ describe("OpenROADManager", () => {
   });
 
   describe("executeCommand", () => {
-    it("delegates to sendCommand then readOutput", async () => {
+    it("delegates to runCommand so completion is actually detected", async () => {
       await manager.createSession({ sessionId: "s1" });
       const result = await manager.executeCommand("s1", "report_wns");
-      expect(created[0]!.sendCommand).toHaveBeenCalledWith("report_wns");
-      expect(created[0]!.readOutput).toHaveBeenCalledOnce();
+      expect(created[0]!.runCommand).toHaveBeenCalledWith("report_wns", expect.any(Number));
+      // readOutput cannot tell a finished command from a quiet one, so the
+      // command path must never fall back to it.
+      expect(created[0]!.readOutput).not.toHaveBeenCalled();
       expect(result.output).toBe("ok");
     });
 
@@ -172,8 +239,8 @@ describe("OpenROADManager", () => {
     it("falls back to the default timeout when timeoutMs is 0", async () => {
       await manager.createSession({ sessionId: "s1" });
       await manager.executeCommand("s1", "report_wns", 0);
-      // 0 must not be forwarded as an instant timeout; readOutput gets the default.
-      const timeoutArg = created[0]!.readOutput.mock.calls[0]![0] as number;
+      // 0 must not be forwarded as an instant timeout; runCommand gets the default.
+      const timeoutArg = created[0]!.runCommand.mock.calls[0]![1] as number;
       expect(timeoutArg).toBeGreaterThan(0);
     });
   });
@@ -323,7 +390,7 @@ describe("OpenROADManager", () => {
     it("forwards an explicit positive timeoutMs as-is", async () => {
       await manager.createSession({ sessionId: "s1" });
       await manager.executeCommand("s1", "report_wns", 5000);
-      expect(created[0]!.readOutput).toHaveBeenCalledWith(5000);
+      expect(created[0]!.runCommand).toHaveBeenCalledWith("report_wns", 5000);
     });
   });
 

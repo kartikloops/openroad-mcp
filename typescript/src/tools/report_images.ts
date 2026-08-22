@@ -41,7 +41,7 @@ const IMAGE_TYPE_MAPPING: Record<string, string> = {
  * ["unknown", "unknown"] for files with no underscore or unrecognised keys.
  */
 export function classifyImageType(filename: string): [string, string] {
-  const basename = path.basename(filename, path.extname(filename));
+  const basename = stripImageExtension(path.basename(filename));
   const underscoreIdx = basename.indexOf("_");
   let stage: string;
   let key: string;
@@ -97,14 +97,50 @@ function availableRuns(reportsBase: string): string[] {
   }
 }
 
-function findWebpFiles(dir: string): string[] {
+/**
+ * Report image extensions.
+ *
+ * ORFS does not consistently name these: depending on the build, save_images
+ * writes `final_all.webp` or `final_all.webp.png` (a PNG carrying a doubled
+ * extension). Matching only `.webp` silently finds nothing on the latter, so
+ * accept both and let the decoder sort out the actual format.
+ */
+const IMAGE_EXTENSIONS = [".webp.png", ".webp", ".png"];
+
+export function isReportImage(filename: string): boolean {
+  return IMAGE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext));
+}
+
+/**
+ * Format of the bytes actually returned, which is not always WebP.
+ *
+ * Only the compression path re-encodes; images small enough to send as-is are
+ * returned byte-for-byte from disk. Since `.webp.png` files really are PNG,
+ * reporting a blanket "webp" would misdescribe the payload to any consumer that
+ * trusts this field instead of sniffing the header.
+ */
+function imageFormat(filename: string, compressionApplied: boolean): string {
+  if (compressionApplied) return "webp";
+  return filename.toLowerCase().endsWith(".webp") ? "webp" : "png";
+}
+
+/** Strip the report-image extension, including the doubled `.webp.png` form. */
+function stripImageExtension(filename: string): string {
+  const lower = filename.toLowerCase();
+  for (const ext of IMAGE_EXTENSIONS) {
+    if (lower.endsWith(ext)) return filename.slice(0, filename.length - ext.length);
+  }
+  return filename;
+}
+
+function findImageFiles(dir: string): string[] {
   const results: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...findWebpFiles(full));
-    } else if (entry.isFile() && entry.name.endsWith(".webp")) {
+      results.push(...findImageFiles(full));
+    } else if (entry.isFile() && isReportImage(entry.name)) {
       results.push(full);
     }
   }
@@ -250,17 +286,34 @@ export class ListReportImagesTool extends BaseTool {
     try {
       let files: string[];
       try {
-        files = findWebpFiles(runPath);
+        files = findImageFiles(runPath);
       } catch {
         files = [];
       }
 
       if (files.length === 0) {
+        // An empty result is ambiguous: no images generated, or images present
+        // under a name we do not recognise. Say which, so a caller is never
+        // left guessing whether the run or the tool is at fault.
+        let hint = "No report images found in this run directory.";
+        try {
+          const others = fs
+            .readdirSync(runPath, { withFileTypes: true })
+            .filter((e) => e.isFile() && /\.(png|jpe?g|gif|svg|webp)$/i.test(e.name))
+            .map((e) => e.name);
+          if (others.length > 0) {
+            hint =
+              `Found ${others.length} image-like file(s) that do not match the expected ` +
+              `extensions (${IMAGE_EXTENSIONS.join(", ")}): ${others.slice(0, 10).join(", ")}`;
+          }
+        } catch { /* directory listing is best effort */ }
+
         return this.formatResult(
           ListImagesResult.parse({
             runPath,
             totalImages: 0,
             imagesByStage: {},
+            message: hint,
           }) as unknown as Record<string, unknown>,
         );
       }
@@ -357,11 +410,11 @@ export class ReadReportImageTool extends BaseTool {
       );
     }
 
-    if (!imageName.endsWith(".webp")) {
+    if (!isReportImage(imageName)) {
       return this.formatResult(
         ReadImageResult.parse({
           error: "InvalidImageName",
-          message: `Image '${imageName}' must have a .webp extension`,
+          message: `Image '${imageName}' must end in one of: ${IMAGE_EXTENSIONS.join(", ")}`,
         }) as unknown as Record<string, unknown>,
       );
     }
@@ -392,7 +445,7 @@ export class ReadReportImageTool extends BaseTool {
     if (!fs.existsSync(imagePath)) {
       let available: string[] = [];
       try {
-        available = findWebpFiles(runPath).map((f) => path.basename(f));
+        available = findImageFiles(runPath).map((f: string) => path.basename(f));
       } catch {
         available = [];
       }
@@ -434,7 +487,7 @@ export class ReadReportImageTool extends BaseTool {
 
       const metadata = ImageMetadata.parse({
         filename: imageName,
-        format: "webp",
+        format: imageFormat(imageName, r.compressionApplied),
         sizeBytes: r.compressedSize,
         width: r.width,
         height: r.height,

@@ -12,8 +12,8 @@ function makeMockSession(sessionId: string) {
     lastActivity: new Date(),
     checkAlive: vi.fn().mockReturnValue(true),
     start: vi.fn().mockResolvedValue(undefined),
-    sendCommand: vi.fn().mockResolvedValue(undefined),
-    readOutput: vi.fn().mockResolvedValue({
+    verifyResponsive: vi.fn().mockResolvedValue(undefined),
+    runCommand: vi.fn().mockResolvedValue({
       output: "ok",
       sessionId,
       timestamp: new Date().toISOString(),

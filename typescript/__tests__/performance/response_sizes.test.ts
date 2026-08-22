@@ -114,6 +114,7 @@ describe("Live Tool Compactness", () => {
         lastActivity: new Date(),
         checkAlive: vi.fn().mockReturnValue(true),
         start: vi.fn().mockResolvedValue(undefined),
+        verifyResponsive: vi.fn().mockResolvedValue(undefined),
         getInfo: vi.fn().mockResolvedValue({
           sessionId,
           createdAt: new Date().toISOString(),

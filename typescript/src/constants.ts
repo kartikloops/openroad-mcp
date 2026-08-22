@@ -25,3 +25,36 @@ export const SLOW_OPERATION_THRESHOLD = 1.0;
 // Bounds memory on long-lived sessions; oldest entries are dropped when
 // exceeded.
 export const MAX_COMMAND_HISTORY = 1000;
+
+/**
+ * PTY geometry and terminal type.
+ *
+ * OpenROAD runs a readline-style line editor when stdin is a TTY. At a narrow
+ * width that editor horizontally scrolls long commands, redrawing the whole
+ * visible window once per character -- a single 75-character read_liberty turns
+ * into a cascade of near-identical lines that swamps the real output. A width
+ * far beyond any realistic command avoids the redraw entirely.
+ *
+ * TERM=dumb tells readline to skip the fancy editing layer (bracketed paste,
+ * horizontal scroll, cursor addressing) that we neither need nor can interpret.
+ */
+export const PTY_COLS = 4096;
+export const PTY_ROWS = 24;
+export const PTY_TERM = "dumb";
+
+/**
+ * Line terminator written after each command. A real Enter key sends carriage
+ * return, and a line editor in raw mode binds CR -- not LF -- to accept-line.
+ * Sending LF can leave the command sitting unsubmitted in the edit buffer.
+ */
+export const PTY_LINE_TERMINATOR = "\r";
+
+/**
+ * Budget for the startup handshake. This has to cover the whole cold start --
+ * loading OpenROAD and reaching its prompt -- not just the probe round-trip,
+ * because spawning does not wait for readiness. OpenROAD is native C++ and a
+ * healthy start is sub-second locally, so this is a few seconds of margin for
+ * a slow disk/container, not an expected duration: the handshake exists to
+ * catch a session that will never respond, not to tolerate a slow one.
+ */
+export const SESSION_HANDSHAKE_TIMEOUT_MS = 10_000;

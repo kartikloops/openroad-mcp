@@ -15,11 +15,43 @@ import {
   BYTES_TO_MB,
   MAX_COMMAND_COMPLETION_WINDOW,
   MAX_COMMAND_HISTORY,
+  PTY_LINE_TERMINATOR,
   UTILIZATION_PERCENTAGE_BASE,
 } from "../constants.js";
 import { CircularBuffer } from "./buffer.js";
 import { SessionError, SessionTerminatedError } from "./models.js";
 import { PtyHandler } from "./pty_handler.js";
+
+/**
+ * Completion sentinel. After each user command we emit a marker line and read
+ * until it appears, which is the only reliable signal that OpenROAD finished:
+ * output alone cannot distinguish "still working" from "done", and a quiet
+ * period is not a completion signal for commands that think silently for
+ * minutes (read_db, repair_timing, detailed route).
+ *
+ * The Tcl is written so the assembled marker never appears in the PTY's echo of
+ * the input line -- `join` builds "ORMCP-DONE-<nonce>" at runtime, so a search
+ * for that literal can only match real stdout, never the echoed source.
+ */
+const SENTINEL_MARKER = (nonce: string): string => `ORMCP-DONE-${nonce}`;
+const SENTINEL_COMMAND = (nonce: string): string => `puts "[join {ORMCP DONE ${nonce}} -]"`;
+
+/** Matches any sentinel, including a stale one left by a timed-out command. */
+const ANY_SENTINEL_LINE = /ORMCP[-\s]DONE[-\s][0-9a-z]+/i;
+
+/**
+ * Startup probe. Uses the same runtime-assembly trick as the sentinel for the
+ * same reason: a probe whose token appears verbatim in its own source would be
+ * satisfied by the PTY's echo, so a session that echoes every keystroke but
+ * executes nothing -- precisely the failure this guards against -- would pass.
+ */
+const PROBE_COMMAND = `puts "[join {ORMCP READY OK} -]"`;
+const PROBE_TOKEN = "ORMCP-READY-OK";
+
+/** Liveness re-check cadence while blocked waiting for the sentinel. Bounded so
+ * a process that dies without emitting output is noticed promptly rather than
+ * at the full command timeout. */
+const SENTINEL_POLL_MS = 200;
 
 const ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/invalid command name "([^"]+)"/i, "Invalid command: {0}"],
@@ -35,6 +67,11 @@ const ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/Error: net ([^\s]+) not found/i, "Net not found: {0}"],
   [/Error: clock ([^\s]+) not found/i, "Clock not found: {0}"],
   [/Error: no clocks defined/i, "No clocks defined"],
+  // OpenROAD's native log format: [ERROR RSZ-0089] message. Must precede the
+  // generic "Error:" rules — those look for a colon, so this form was being
+  // returned as success with the failure sitting in the output text.
+  [/\[ERROR\s+([A-Z]+-\d+)\]\s*([^\r\n]+)/, "OpenROAD {0}: {1}"],
+  [/\[FATAL\s+([A-Z]+-\d+)\]\s*([^\r\n]+)/, "OpenROAD fatal {0}: {1}"],
   [/Error: (.+?)(?:\r?\n|$)/im, "Error: {0}"],
   [/ERROR: (.+?)(?:\r?\n|$)/m, "Error: {0}"],
   [/FATAL: (.+?)(?:\r?\n|$)/m, "Fatal error: {0}"],
@@ -65,6 +102,7 @@ export class InteractiveSession {
   private _inputQueue: string[] = [];
   private _inputWaiters: Array<() => void> = [];
   private _isShutdown = false;
+  private _sentinelCounter = 0;
   private _writerTask: Promise<void> | null = null;
   // Serialises terminate()/cleanup() so concurrent callers cannot double-kill
   // the process or deliver a stale exit code to waiters.
@@ -200,16 +238,186 @@ export class InteractiveSession {
       this.commandHistory.shift();
     }
 
-    const data = command.endsWith("\n") ? command : command + "\n";
-    this._inputQueue.push(data);
+    this._enqueueRaw(command);
     this.commandCount++;
     this.totalCommandsExecuted++;
     this.lastActivity = new Date();
+  }
 
+  /** Queue a line for the writer task without touching history or counters.
+   * Used for the internal completion sentinel, which is bookkeeping rather
+   * than a user command and must not appear in the audit trail. */
+  private _enqueueRaw(command: string): void {
+    // Every embedded newline is a line the editor has to accept, not just the
+    // final one, so normalise all of them rather than only the terminator.
+    const line = command.replace(/\r?\n/g, PTY_LINE_TERMINATOR).replace(/\r+$/, "");
+    this._inputQueue.push(line + PTY_LINE_TERMINATOR);
     const waiters = this._inputWaiters.splice(0);
     for (const w of waiters) w();
   }
 
+  /**
+   * Prove the session can actually execute a command before it is handed out.
+   *
+   * A PTY-attached OpenROAD can come up healthy-looking -- process alive,
+   * prompt printed -- while its line editor never accepts the lines we write,
+   * so every command silently does nothing. Failing here turns that into an
+   * immediate, obvious session-creation error instead of a run's worth of
+   * results that were never computed.
+   */
+  async verifyResponsive(timeoutMs = 15000): Promise<void> {
+    const result = await this.runCommand(PROBE_COMMAND, timeoutMs);
+    if (!result.output.includes(PROBE_TOKEN)) {
+      throw new SessionError(
+        `Session ${this.sessionId} started but is not executing commands: the OpenROAD ` +
+          `process is alive yet never ran a probe command within ${timeoutMs}ms. This usually ` +
+          `means its interactive line editor is not accepting input. ` +
+          `Probe error: ${result.error ?? "none"}. ` +
+          `Probe returned: ${JSON.stringify(result.output.slice(-200))}`,
+        this.sessionId,
+      );
+    }
+    // The probe is plumbing, not user activity; keep it out of the audit trail.
+    this.commandHistory.length = 0;
+    this.commandCount = 0;
+    this.totalCommandsExecuted = 0;
+  }
+
+  /**
+   * Send a command and read until it actually completes.
+   *
+   * Prefer this over sendCommand + readOutput: readOutput cannot tell a
+   * finished command from one that has merely gone quiet, so it returns the
+   * PTY's echo as a successful result for anything slower than a few
+   * milliseconds. This waits for an explicit sentinel and reports a real error
+   * when the command does not finish inside timeoutMs.
+   */
+  async runCommand(command: string, timeoutMs = 30000): Promise<InteractiveExecResult> {
+    const startTime = Date.now();
+
+    if (!this.checkAlive()) {
+      return this._drainTerminatedSession(startTime);
+    }
+
+    const nonce = `${Date.now().toString(36)}${(this._sentinelCounter++).toString(36)}${Math.floor(
+      Math.random() * 0xffffff,
+    ).toString(36)}`;
+    const marker = SENTINEL_MARKER(nonce);
+
+    await this.sendCommand(command);
+    this._enqueueRaw(SENTINEL_COMMAND(nonce));
+
+    const { text, timedOut, died } = await this._readUntilMarker(marker, startTime, timeoutMs);
+
+    const executionTime = (Date.now() - startTime) / 1000;
+    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(text));
+
+    await this._updatePerformanceMetrics();
+    this._recordReadResult(output.length, executionTime);
+
+    // An incomplete result outranks anything matched inside it: a command that
+    // printed "Error:" and then kept running must not look like it finished.
+    let error: string | null;
+    if (timedOut) {
+      error = `CommandTimeout: command did not complete within ${timeoutMs}ms`;
+    } else if (died) {
+      error = "SessionTerminated: process exited before the command completed";
+    } else {
+      error = this._detectErrors(output) ?? null;
+    }
+
+    return {
+      output,
+      sessionId: this.sessionId,
+      timestamp: new Date().toISOString(),
+      executionTime,
+      commandCount: this.commandCount,
+      bufferSize: this.outputBuffer.size,
+      error,
+    };
+  }
+
+  /**
+   * Accumulate output until the sentinel arrives, the deadline passes, or the
+   * process dies. Accumulation is capped at the buffer's configured size,
+   * keeping the tail, so a verbose multi-megabyte command cannot grow the heap
+   * without bound. The sentinel is last, so trimming the front never loses it.
+   */
+  private async _readUntilMarker(
+    marker: string,
+    startTime: number,
+    timeoutMs: number,
+  ): Promise<{ text: string; timedOut: boolean; died: boolean }> {
+    const cap = Math.max(this.outputBuffer.maxSize, 1);
+    let text = "";
+
+    const absorb = (chunks: string[]): void => {
+      if (chunks.length === 0) return;
+      text += chunks.join("");
+      if (text.length > cap) text = text.slice(text.length - cap);
+    };
+
+    for (;;) {
+      absorb(await this.outputBuffer.drainAll());
+      if (text.includes(marker)) return { text, timedOut: false, died: false };
+
+      if (!this.checkAlive()) {
+        absorb(await this.outputBuffer.drainAll());
+        return { text, timedOut: false, died: !text.includes(marker) };
+      }
+
+      const remaining = timeoutMs - (Date.now() - startTime);
+      if (remaining <= 0) return { text, timedOut: true, died: false };
+
+      // Capped so process death (which appends nothing) is still noticed.
+      await this.outputBuffer.waitForData(Math.min(remaining, SENTINEL_POLL_MS));
+    }
+  }
+
+  /** Remove sentinel echo and marker lines so callers never see the plumbing.
+   * Matches any sentinel, not just the current one, so a marker left behind by
+   * a previously timed-out command cannot leak into a later result. */
+  private _stripSentinelLines(text: string): string {
+    if (!ANY_SENTINEL_LINE.test(text)) return text;
+    // Terminals delimit with CR, LF or CRLF, and a line editor emits bare CRs
+    // when it redraws. Splitting on LF alone would leave the sentinel sharing a
+    // segment with real output and discard both.
+    return text
+      .split(/\r\n|[\r\n]/)
+      .filter((line) => !ANY_SENTINEL_LINE.test(line))
+      .join("\n");
+  }
+
+  /** Shared drain-before-reject path for a session that is already dead. */
+  private async _drainTerminatedSession(startTime: number): Promise<InteractiveExecResult> {
+    this._signalShutdown();
+    const chunks = await this.outputBuffer.drainAll();
+    if (chunks.length === 0) {
+      throw new SessionTerminatedError(`Session ${this.sessionId} is not active`, this.sessionId);
+    }
+    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(chunks.join("")));
+    const executionTime = (Date.now() - startTime) / 1000;
+    this._recordReadResult(output.length, executionTime);
+    return {
+      output,
+      sessionId: this.sessionId,
+      timestamp: new Date().toISOString(),
+      executionTime,
+      commandCount: this.commandCount,
+      bufferSize: this.outputBuffer.size,
+      error: this._detectErrors(output) ?? null,
+    };
+  }
+
+  /**
+   * Drain whatever output has arrived, using a quiet period as a stop signal.
+   *
+   * This cannot detect command completion -- a command that thinks silently
+   * for longer than MAX_COMMAND_COMPLETION_WINDOW returns here as an empty
+   * success. Use runCommand() for anything that needs to know the command
+   * actually finished; this remains for callers that just want to sample the
+   * buffer.
+   */
   async readOutput(timeoutMs = 1000): Promise<InteractiveExecResult> {
     const startTime = Date.now();
 
@@ -222,24 +430,7 @@ export class InteractiveSession {
       // Return whatever is buffered rather than discarding it.
       // Also signal shutdown here so the writer task is guaranteed to stop
       // even when readOutput() is the first caller to observe the dead state.
-      this._signalShutdown();
-      const chunks = await this.outputBuffer.drainAll();
-      if (chunks.length === 0) {
-        throw new SessionTerminatedError(`Session ${this.sessionId} is not active`, this.sessionId);
-      }
-      const rawOutput = chunks.join("");
-      const output = ANSIDecoder.cleanOpenroadOutput(rawOutput);
-      const executionTime = (Date.now() - startTime) / 1000;
-      this._recordReadResult(output.length, executionTime);
-      return {
-        output,
-        sessionId: this.sessionId,
-        timestamp: new Date().toISOString(),
-        executionTime,
-        commandCount: this.commandCount,
-        bufferSize: this.outputBuffer.size,
-        error: this._detectErrors(output) ?? null,
-      };
+      return this._drainTerminatedSession(startTime);
     }
 
     const collected: string[] = [];
@@ -406,10 +597,11 @@ export class InteractiveSession {
     for (const [pattern, template] of ERROR_PATTERNS) {
       const match = pattern.exec(output);
       if (match) {
-        const capture = match[1];
         // Function replacement so `$&`/`$1`/`$$` inside the captured error text
         // are inserted literally, not reinterpreted as replacement patterns.
-        return capture ? template.replace("{0}", () => capture.trim()) : template;
+        return template
+          .replace("{0}", () => (match[1] ?? "").trim())
+          .replace("{1}", () => (match[2] ?? "").trim());
       }
     }
 

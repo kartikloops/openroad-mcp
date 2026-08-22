@@ -124,15 +124,38 @@ describe("InteractiveSession", () => {
       expect(session.inputQueueSize()).toBe(1);
     });
 
-    it("appends newline to command if missing", async () => {
-      session.state = SessionState.ACTIVE;
+    it("terminates each command with a carriage return, normalising any trailing newline", async () => {
+      await session.start(["openroad", "-no_init"]);
       (mockPty.isProcessAlive as ReturnType<typeof vi.fn>).mockReturnValue(true);
 
       await session.sendCommand("test command");
-      expect(session.inputQueueSize()).toBe(1);
-
       await session.sendCommand("with newline\n");
       expect(session.commandCount).toBe(2);
+
+      // A line editor in raw mode accepts CR, not LF; sending LF can leave the
+      // command unsubmitted in the edit buffer.
+      await vi.waitFor(() => {
+        expect(mockPty.writeInput).toHaveBeenCalledTimes(2);
+      });
+      const written = (mockPty.writeInput as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+      expect(written[0]).toBe("test command\r");
+      expect(written[1]).toBe("with newline\r");
+    });
+
+    it("converts embedded newlines to carriage returns in a multi-line command", async () => {
+      await session.start(["openroad", "-no_init"]);
+      (mockPty.isProcessAlive as ReturnType<typeof vi.fn>).mockReturnValue(true);
+
+      // Each inner line has to be accepted by the editor too, so an LF left in
+      // the middle would strand everything after it in the edit buffer.
+      await session.sendCommand("set a 1\nset b 2");
+
+      await vi.waitFor(() => {
+        expect(mockPty.writeInput).toHaveBeenCalledTimes(1);
+      });
+      expect((mockPty.writeInput as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toBe(
+        "set a 1\rset b 2\r",
+      );
     });
 
     it("throws SessionTerminatedError on terminated session", async () => {
@@ -252,6 +275,167 @@ describe("InteractiveSession", () => {
 
       expect(result.output).toContain("delayed output");
       expect(result.executionTime).toBeGreaterThan(0);
+    });
+
+    it("cannot detect completion: returns the echo as success while the command is still running", async () => {
+      // Characterisation test, not aspirational. readOutput stops after
+      // MAX_COMMAND_COMPLETION_WINDOW of silence, so a command that echoes
+      // immediately and then thinks for 400ms looks finished and successful.
+      // This is why executeCommand routes through runCommand instead; if you
+      // are tempted to use readOutput for a command, read this first.
+      await session.outputBuffer.append("read_db /tmp/big.odb\r\n"); // PTY echo
+      setTimeout(() => {
+        void session.outputBuffer.append("real result arrives late\r\n");
+      }, 400);
+
+      const result = await session.readOutput(5000);
+
+      expect(result.output).not.toContain("real result arrives late");
+      expect(result.error).toBeNull();
+      expect(result.executionTime).toBeLessThan(0.3);
+    });
+  });
+
+  describe("runCommand (sentinel-based completion)", () => {
+    const NONCE_RE = /join \{ORMCP DONE (\S+)\}/;
+
+    /**
+     * Drive the mock PTY like a real one: echo every written line back, then
+     * after `thinkMs` of silence emit the command's output followed by the
+     * sentinel. `thinkMs` is the whole point -- it reproduces a command that
+     * stays quiet longer than the old 100ms completion window.
+     */
+    function wirePty(opts: { thinkMs: number; output: string; emitSentinel?: boolean }): void {
+      const { thinkMs, output, emitSentinel = true } = opts;
+      (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+        // A terminal echoes the submitted line back as CRLF.
+        void session.outputBuffer.append(data.replace(/\r$/, "\r\n"));
+        const match = NONCE_RE.exec(data);
+        if (!match) return;
+        const nonce = match[1]!;
+        setTimeout(() => {
+          void session.outputBuffer.append(output);
+          if (emitSentinel) void session.outputBuffer.append(`ORMCP-DONE-${nonce}\r\n`);
+        }, thinkMs);
+      });
+    }
+
+    beforeEach(async () => {
+      await session.start(["openroad", "-no_init"]);
+    });
+
+    it("waits for a command that stays silent well past the 100ms completion window", async () => {
+      // The regression that shipped: readOutput() saw the PTY echo, waited
+      // MAX_COMMAND_COMPLETION_WINDOW (100ms), saw nothing more, and returned
+      // the echo as a successful empty result while OpenROAD was still working.
+      wirePty({ thinkMs: 400, output: "wns max -0.485\r\n" });
+
+      const result = await session.runCommand("report_wns", 5000);
+
+      expect(result.output).toContain("wns max -0.485");
+      expect(result.error).toBeNull();
+      expect(result.executionTime).toBeGreaterThan(0.3);
+    });
+
+    it("strips the sentinel echo and marker from the returned output", async () => {
+      wirePty({ thinkMs: 10, output: "real output\r\n" });
+
+      const result = await session.runCommand("report_wns", 2000);
+
+      expect(result.output).toContain("real output");
+      expect(result.output).not.toContain("ORMCP");
+      expect(result.output).not.toContain("join {");
+    });
+
+    it("reports CommandTimeout instead of silent success when the command never finishes", async () => {
+      wirePty({ thinkMs: 10, output: "partial work\r\n", emitSentinel: false });
+
+      const result = await session.runCommand("repair_timing", 400);
+
+      expect(result.error).toMatch(/CommandTimeout/);
+      expect(result.output).toContain("partial work");
+    });
+
+    it("does not report success when the process dies mid-command", async () => {
+      (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+        void session.outputBuffer.append(data.replace(/\r$/, "\r\n"));
+        if (NONCE_RE.test(data)) {
+          setTimeout(() => {
+            (mockPty.isProcessAlive as ReturnType<typeof vi.fn>).mockReturnValue(false);
+          }, 50);
+        }
+      });
+
+      const result = await session.runCommand("read_db /tmp/huge.odb", 3000);
+
+      expect(result.error).toMatch(/SessionTerminated/);
+    });
+
+    it("keeps the sentinel out of the audit trail", async () => {
+      wirePty({ thinkMs: 10, output: "ok\r\n" });
+
+      await session.runCommand("report_tns", 2000);
+
+      const history = session.getCommandHistory();
+      expect(history).toHaveLength(1);
+      expect(history[0]!.command).toBe("report_tns");
+      expect(session.commandCount).toBe(1);
+    });
+
+    it("records a real per-command execution time rather than a fixed window", async () => {
+      wirePty({ thinkMs: 350, output: "done\r\n" });
+
+      await session.runCommand("place_design", 5000);
+
+      const entry = session.getCommandHistory()[0]!;
+      expect(entry.executionTime).toBeGreaterThan(0.3);
+    });
+
+    it("suppresses a stale marker left behind by an earlier timed-out command", async () => {
+      await session.outputBuffer.append("ORMCP-DONE-staleabc123\r\n");
+      wirePty({ thinkMs: 10, output: "fresh output\r\n" });
+
+      const result = await session.runCommand("report_checks", 2000);
+
+      expect(result.output).toContain("fresh output");
+      expect(result.output).not.toContain("staleabc123");
+    });
+
+    it("verifyResponsive rejects a session whose line editor never accepts input", async () => {
+      // The VM failure: the process is alive and echoes every submitted line
+      // back cleanly, but never runs it. The echo alone must not satisfy the
+      // probe, which is why the probe token is assembled at runtime.
+      (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
+        void session.outputBuffer.append(data.replace(/\r$/, "\r\n"));
+      });
+
+      await expect(session.verifyResponsive(600)).rejects.toThrow(/not executing commands/);
+    });
+
+    it("verifyResponsive accepts a healthy session without polluting the audit trail", async () => {
+      wirePty({ thinkMs: 10, output: "ORMCP-READY-OK\r\n" });
+
+      await session.verifyResponsive(2000);
+
+      expect(session.getCommandHistory()).toHaveLength(0);
+      expect(session.commandCount).toBe(0);
+    });
+
+    it("reports a timeout even when the partial output contains an error pattern", async () => {
+      wirePty({ thinkMs: 10, output: "Error: something went wrong\r\n", emitSentinel: false });
+
+      const result = await session.runCommand("long_running_thing", 400);
+
+      // A truncated result must not be presented as a completed, failed one.
+      expect(result.error).toMatch(/CommandTimeout/);
+    });
+
+    it("still surfaces OpenROAD errors detected in the output", async () => {
+      wirePty({ thinkMs: 10, output: 'invalid command name "bogus_cmd"\r\n' });
+
+      const result = await session.runCommand("bogus_cmd", 2000);
+
+      expect(result.error).toContain("Invalid command");
     });
   });
 
@@ -575,6 +759,27 @@ describe("InteractiveSession", () => {
       await session.outputBuffer.append("FATAL: segmentation fault\n");
       const result = await session.readOutput(100);
       expect(result.error).toMatch(/Fatal error/);
+    });
+
+    it("detects OpenROAD [ERROR CODE-NNNN] lines, which have no colon", async () => {
+      // The dry-run failure: repair_timing printed [ERROR RSZ-0089] and the
+      // tool still returned error: null because only "Error:" / "ERROR:" were
+      // recognised. Warnings must stay non-errors.
+      await session.outputBuffer.append(
+        "[WARNING EST-0027] no estimated parasitics. Using wire load models.\n" +
+          "[ERROR RSZ-0089] Could not find a resistance value for any corner. Cannot evaluate max wire length for buffer.\n",
+      );
+      const result = await session.readOutput(100);
+      expect(result.error).toMatch(/OpenROAD RSZ-0089/);
+      expect(result.error).toMatch(/resistance value/);
+    });
+
+    it("does not treat an OpenROAD [WARNING] line as a command failure", async () => {
+      await session.outputBuffer.append(
+        "[WARNING EST-0027] no estimated parasitics. Using wire load models.\n",
+      );
+      const result = await session.readOutput(100);
+      expect(result.error).toBeNull();
     });
 
     it("detects invalid command name pattern", async () => {

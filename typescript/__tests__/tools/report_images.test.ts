@@ -77,6 +77,16 @@ async function writeRealWebp(filePath: string, width: number, height: number): P
   fs.writeFileSync(filePath, buffer);
 }
 
+/** Writes a real PNG, for the `.webp.png` files some ORFS builds emit. */
+async function writeRealPng(filePath: string, width: number, height: number): Promise<void> {
+  const buffer = await sharp({
+    create: { width, height, channels: 3, background: { r: 10, g: 20, b: 30 } },
+  })
+    .png()
+    .toBuffer();
+  fs.writeFileSync(filePath, buffer);
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openroad-test-"));
 });
@@ -107,6 +117,12 @@ describe("classifyImageType", () => {
   it("returns unknown stage when filename has no underscore", () => {
     const [stage, _type] = classifyImageType("nounderscore.webp");
     expect(stage).toBe("unknown");
+  });
+
+  it("classifies the doubled .webp.png extension some ORFS builds emit", () => {
+    expect(classifyImageType("final_all.webp.png")).toEqual(["final", "complete_design"]);
+    expect(classifyImageType("final_routing.webp.png")).toEqual(["final", "routing_visualization"]);
+    expect(classifyImageType("cts_clk.png")).toEqual(["cts", "clock_visualization"]);
   });
 });
 
@@ -173,6 +189,46 @@ describe("ListReportImagesTool", () => {
     const result = JSON.parse(raw);
     expect(result.total_images).toBe(0);
     expect(result.images_by_stage).toEqual({});
+  });
+
+  it("finds images written with the doubled .webp.png extension", async () => {
+    // The naming a real ORFS build produced; matching only ".webp" reported
+    // zero images for a directory that was full of them.
+    const { flowPath } = createFixture("nangate45", "gcd", "run-123", [
+      "final_all.webp.png",
+      "final_routing.webp.png",
+      "cts_clk.webp",
+    ]);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await tool.execute("nangate45", "gcd", "run-123");
+    const result = JSON.parse(raw);
+    expect(result.total_images).toBe(3);
+    expect(result.images_by_stage["final"]).toHaveLength(2);
+    expect(result.images_by_stage["cts"]).toHaveLength(1);
+    expect(result.images_by_stage["final"][0].type).toBe("complete_design");
+  });
+
+  it("explains an empty result when the directory holds unrecognised image files", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-odd", []);
+    fs.writeFileSync(path.join(runPath, "layout.tiff"), Buffer.from("x"));
+    fs.writeFileSync(path.join(runPath, "shot.jpeg"), Buffer.from("x"));
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+    const raw = await tool.execute("nangate45", "gcd", "run-odd");
+    const result = JSON.parse(raw);
+    expect(result.total_images).toBe(0);
+    // A bare zero cannot distinguish "no images" from "tool did not match them".
+    expect(result.message).toMatch(/do not match the expected extensions/);
+    expect(result.message).toContain("shot.jpeg");
   });
 
   it("lists all .webp files grouped by stage", async () => {
@@ -301,6 +357,27 @@ describe("ReadReportImageTool", () => {
     expect(result.metadata.filename).toBe("cts_clk.webp");
     expect(result.metadata.stage).toBe("cts");
     expect(result.metadata.type).toBe("clock_visualization");
+    expect(result.metadata.format).toBe("webp");
+  });
+
+  it("reports the real format of a .webp.png, which is returned as PNG bytes", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    // Small enough to skip compression, so the bytes are the file's own.
+    await writeRealPng(path.join(runPath, "final_all.webp.png"), 4, 4);
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+
+    const result = JSON.parse(await tool.execute("nangate45", "gcd", "run-123", "final_all.webp.png"));
+
+    // The declared format has to match the bytes: a consumer that trusts it
+    // instead of sniffing the header would otherwise fail to decode.
+    const decoded = Buffer.from(result.image_data, "base64");
+    expect(decoded.subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    expect(result.metadata.format).toBe("png");
   });
 
   it("returns FileTooLarge error when image exceeds 50 MB", async () => {
@@ -324,7 +401,7 @@ describe("ReadReportImageTool", () => {
     statSpy.mockRestore();
   });
 
-  it("rejects non-.webp extension", async () => {
+  it("rejects a non-image extension", async () => {
     const { flowPath } = createFixture();
     (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
       platforms: ["nangate45"],
@@ -332,7 +409,7 @@ describe("ReadReportImageTool", () => {
       flowPath,
       WHITELIST_ENABLED: false,
     });
-    const raw = await tool.execute("nangate45", "gcd", "run-123", "cts_clk.png");
+    const raw = await tool.execute("nangate45", "gcd", "run-123", "cts_clk.txt");
     const result = JSON.parse(raw);
     expect(result.error).toBe("InvalidImageName");
   });

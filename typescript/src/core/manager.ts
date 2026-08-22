@@ -1,5 +1,6 @@
 import { Mutex } from "async-mutex";
 import { randomUUID } from "node:crypto";
+import { SESSION_HANDSHAKE_TIMEOUT_MS } from "../constants.js";
 import { getSettings } from "../config/settings.js";
 import type { Settings } from "../config/settings.js";
 import { getLogger } from "../utils/logging.js";
@@ -39,6 +40,11 @@ export class OpenROADManager {
   private readonly maxSessions: number;
   private readonly defaultTimeoutMs: number;
   private readonly defaultBufferSize: number;
+  // Covers the whole cold start, not just the probe round-trip: start() only
+  // spawns, so OpenROAD still has to load and reach its prompt inside this
+  // budget. See SESSION_HANDSHAKE_TIMEOUT_MS for why this is a few seconds of
+  // margin, not a generous allowance.
+  private readonly handshakeTimeoutMs: number = SESSION_HANDSHAKE_TIMEOUT_MS;
 
   constructor(maxSessions?: number) {
     this.maxSessions = maxSessions ?? this.settings.MAX_SESSIONS;
@@ -50,14 +56,20 @@ export class OpenROADManager {
   async createSession(opts: CreateSessionOptions = {}): Promise<string> {
     const sessionId = opts.sessionId ?? randomUUID().slice(0, 8);
 
-    return this.cleanupLock.runExclusive(async () => {
+    // Reserve the id under the lock, then release it: spawning OpenROAD and
+    // waiting out its handshake takes seconds, and holding the manager-wide
+    // lock for that long stalls every other create/terminate/list.
+    await this.cleanupLock.runExclusive(async () => {
       await this._cleanupTerminatedSessions();
 
       if (this.sessions.has(sessionId)) {
         throw new SessionError(`Session ${sessionId} already exists`, sessionId);
       }
 
-      const activeCount = this._countActive();
+      // Reservations count towards the cap: startup now happens outside the
+      // lock, so without this concurrent creates would all see the same
+      // pre-spawn total and admit past maxSessions together.
+      const activeCount = this._countActive() + this._countReserved();
       if (activeCount >= this.maxSessions) {
         throw new SessionError(
           `Maximum session limit reached (${this.maxSessions}). Currently ${activeCount} active sessions.`,
@@ -67,23 +79,36 @@ export class OpenROADManager {
 
       // Placeholder distinguishes "creating" (null) from "not found" (absent).
       this.sessions.set(sessionId, null);
-
-      try {
-        // 0 (and undefined) fall back to the default so a zero-capacity buffer
-        // can't silently drop all output.
-        const bufferSize = opts.bufferSize && opts.bufferSize > 0 ? opts.bufferSize : this.defaultBufferSize;
-        const session = new InteractiveSession(sessionId, bufferSize);
-        await session.start(opts.command, opts.env, opts.cwd);
-
-        this.sessions.set(sessionId, session);
-        this.logger.info(`Created session ${sessionId}, total sessions: ${this.sessions.size}`);
-        return sessionId;
-      } catch (e) {
-        this.sessions.delete(sessionId);
-        this.logger.error(`Failed to create session ${sessionId}: ${String(e)}`);
-        throw new SessionError(`Failed to create session: ${String(e)}`, sessionId);
-      }
     });
+
+    try {
+      // 0 (and undefined) fall back to the default so a zero-capacity buffer
+      // can't silently drop all output.
+      const bufferSize = opts.bufferSize && opts.bufferSize > 0 ? opts.bufferSize : this.defaultBufferSize;
+      const session = new InteractiveSession(sessionId, bufferSize);
+      try {
+        await session.start(opts.command, opts.env, opts.cwd);
+        // Never hand out a session that cannot run commands.
+        await session.verifyResponsive(this.handshakeTimeoutMs);
+      } catch (e) {
+        // start() may have spawned a process before the failure; without this
+        // an unresponsive session leaves an orphaned OpenROAD behind.
+        await session.terminate(true).catch(() => { /* best effort */ });
+        throw e;
+      }
+
+      await this.cleanupLock.runExclusive(() => {
+        this.sessions.set(sessionId, session);
+      });
+      this.logger.info(`Created session ${sessionId}, total sessions: ${this.sessions.size}`);
+      return sessionId;
+    } catch (e) {
+      await this.cleanupLock.runExclusive(() => {
+        this.sessions.delete(sessionId);
+      });
+      this.logger.error(`Failed to create session ${sessionId}: ${String(e)}`);
+      throw new SessionError(`Failed to create session: ${String(e)}`, sessionId);
+    }
   }
 
   async executeCommand(sessionId: string, command: string, timeoutMs?: number): Promise<InteractiveExecResult> {
@@ -92,8 +117,7 @@ export class OpenROADManager {
     // instant timeout.
     const actualTimeout = timeoutMs && timeoutMs > 0 ? timeoutMs : this.defaultTimeoutMs;
 
-    await session.sendCommand(command);
-    return session.readOutput(actualTimeout);
+    return session.runCommand(command, actualTimeout);
   }
 
   async getSessionInfo(sessionId: string): Promise<InteractiveSessionInfo> {
@@ -242,6 +266,15 @@ export class OpenROADManager {
     let count = 0;
     for (const session of this.sessions.values()) {
       if (session !== null && session.checkAlive()) count++;
+    }
+    return count;
+  }
+
+  /** Ids claimed by an in-flight createSession that has not spawned yet. */
+  private _countReserved(): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session === null) count++;
     }
     return count;
   }
