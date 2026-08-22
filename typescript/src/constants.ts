@@ -19,6 +19,29 @@ export const SIGNIFICANT_LOG_THRESHOLD = 100_000;
 
 export const CHUNK_JOIN_THRESHOLD = 100;
 
+/**
+ * Banner prepended to any command output that lost characters to buffer
+ * overflow.
+ *
+ * The structured `truncated` / `bytes_discarded` fields carry the same fact,
+ * but a consumer reads `output` first: a result that silently begins mid-line
+ * reads as a complete answer, and has been acted on as one. Putting the notice
+ * in the text itself makes that mistake impossible.
+ */
+export function truncationNotice(
+  discarded: number,
+  total: number,
+  retained: number,
+): string {
+  const n = (v: number): string => v.toLocaleString("en-US");
+  return (
+    `[TRUNCATED: ${n(discarded)} of ${n(total)} characters were discarded from the START of this output.\n` +
+    ` What follows is the LAST ${n(retained)} characters only, and may begin mid-line. Any error or\n` +
+    ` warning printed before this point is NOT visible here. Narrow the query and re-run.]\n` +
+    `---\n`
+  );
+}
+
 export const LARGE_IO_THRESHOLD = 10_000;
 export const SLOW_OPERATION_THRESHOLD = 1.0;
 

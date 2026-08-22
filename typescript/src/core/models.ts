@@ -35,7 +35,26 @@ export interface InteractiveExecResult {
   timestamp: string;
   executionTime: number;
   commandCount: number;
+  /**
+   * The session buffer's capacity in characters -- the ceiling that
+   * `bytesDiscarded` was measured against.
+   *
+   * Note this differs from InteractiveSessionInfo.bufferSize, which is the
+   * live residual buffer. Reporting the residual here was useless: a command
+   * result is produced only after the buffer has been drained, so the field
+   * was structurally always 0.
+   */
   bufferSize: number;
+  /** True when output exceeded the buffer and the head was thrown away. */
+  truncated: boolean;
+  /** Characters dropped from the START of the output. 0 when complete. */
+  bytesDiscarded: number;
+  /**
+   * Total raw characters the command produced, before ANSI and sentinel
+   * cleaning. Slightly exceeds output.length + bytesDiscarded on a truncated
+   * result; the difference is escape sequences and plumbing, not lost content.
+   */
+  totalBytes: number;
   error?: string | null;
 }
 

@@ -115,7 +115,10 @@ export const cases: Record<string, () => unknown> = {
       timestamp: TS,
       executionTime: 1.5,
       commandCount: 3,
-      bufferSize: 2048,
+      bufferSize: 131072,
+      truncated: false,
+      bytesDiscarded: 0,
+      totalBytes: 13,
       error: null,
     };
     return toSnakeCase(r);
@@ -128,6 +131,9 @@ export const cases: Record<string, () => unknown> = {
       executionTime: 0.0,
       commandCount: 0,
       bufferSize: 0,
+      truncated: false,
+      bytesDiscarded: 0,
+      totalBytes: 0,
       error: "CommandBlocked: 'exit'",
     };
     return toSnakeCase(r);

@@ -29,7 +29,10 @@ function minimalExecResult(): InteractiveExecResult {
     timestamp: new Date().toISOString(),
     executionTime: 0.01,
     commandCount: 0,
-    bufferSize: 0,
+    bufferSize: 131072,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 4,
     error: null,
   };
 }
@@ -41,7 +44,10 @@ function typicalExecResult(): InteractiveExecResult {
     timestamp: new Date().toISOString(),
     executionTime: 0.123,
     commandCount: 5,
-    bufferSize: 1024,
+    bufferSize: 131072,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 69,
     error: null,
   };
 }

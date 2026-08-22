@@ -16,6 +16,7 @@ import {
   MAX_COMMAND_COMPLETION_WINDOW,
   MAX_COMMAND_HISTORY,
   PTY_LINE_TERMINATOR,
+  truncationNotice,
   UTILIZATION_PERCENTAGE_BASE,
 } from "../constants.js";
 import { CircularBuffer } from "./buffer.js";
@@ -304,13 +305,32 @@ export class InteractiveSession {
     ).toString(36)}`;
     const marker = SENTINEL_MARKER(nonce);
 
+    // Zero the buffer's discard counter so the result accounts for this
+    // command's loss only, not a previous command's.
+    await this.outputBuffer.takeDiscarded();
+
     await this.sendCommand(command);
     this._enqueueRaw(SENTINEL_COMMAND(nonce));
 
-    const { text, timedOut, died } = await this._readUntilMarker(marker, startTime, timeoutMs);
+    const { text, timedOut, died, discarded } = await this._readUntilMarker(
+      marker,
+      startTime,
+      timeoutMs,
+    );
+
+    // Output is lost in two places -- evicted from the buffer before we drained
+    // it, and sliced off the read accumulator once it passed the cap -- so both
+    // have to be summed for the total to be honest.
+    const bytesDiscarded = discarded + (await this.outputBuffer.takeDiscarded());
+    const totalBytes = text.length + bytesDiscarded;
 
     const executionTime = (Date.now() - startTime) / 1000;
-    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(text));
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(text)),
+      bytesDiscarded,
+      totalBytes,
+      text.length,
+    );
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
@@ -323,6 +343,9 @@ export class InteractiveSession {
     } else if (died) {
       error = "SessionTerminated: process exited before the command completed";
     } else {
+      // Only the retained tail is inspected, so an error printed in the
+      // discarded head cannot be reported here. The truncation notice
+      // prepended to `output` is what warns the caller of that blind spot.
       error = this._detectErrors(output) ?? null;
     }
 
@@ -332,9 +355,26 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error,
     };
+  }
+
+  /**
+   * Prepend the truncation banner when output was lost, and leave complete
+   * output byte-for-byte untouched.
+   */
+  private _withTruncationNotice(
+    output: string,
+    bytesDiscarded: number,
+    totalBytes: number,
+    retained: number,
+  ): string {
+    if (bytesDiscarded <= 0) return output;
+    return truncationNotice(bytesDiscarded, totalBytes, retained) + output;
   }
 
   /**
@@ -347,27 +387,31 @@ export class InteractiveSession {
     marker: string,
     startTime: number,
     timeoutMs: number,
-  ): Promise<{ text: string; timedOut: boolean; died: boolean }> {
+  ): Promise<{ text: string; timedOut: boolean; died: boolean; discarded: number }> {
     const cap = Math.max(this.outputBuffer.maxSize, 1);
     let text = "";
+    let discarded = 0;
 
     const absorb = (chunks: string[]): void => {
       if (chunks.length === 0) return;
       text += chunks.join("");
-      if (text.length > cap) text = text.slice(text.length - cap);
+      if (text.length > cap) {
+        discarded += text.length - cap;
+        text = text.slice(text.length - cap);
+      }
     };
 
     for (;;) {
       absorb(await this.outputBuffer.drainAll());
-      if (text.includes(marker)) return { text, timedOut: false, died: false };
+      if (text.includes(marker)) return { text, timedOut: false, died: false, discarded };
 
       if (!this.checkAlive()) {
         absorb(await this.outputBuffer.drainAll());
-        return { text, timedOut: false, died: !text.includes(marker) };
+        return { text, timedOut: false, died: !text.includes(marker), discarded };
       }
 
       const remaining = timeoutMs - (Date.now() - startTime);
-      if (remaining <= 0) return { text, timedOut: true, died: false };
+      if (remaining <= 0) return { text, timedOut: true, died: false, discarded };
 
       // Capped so process death (which appends nothing) is still noticed.
       await this.outputBuffer.waitForData(Math.min(remaining, SENTINEL_POLL_MS));
@@ -395,7 +439,15 @@ export class InteractiveSession {
     if (chunks.length === 0) {
       throw new SessionTerminatedError(`Session ${this.sessionId} is not active`, this.sessionId);
     }
-    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(chunks.join("")));
+    const raw = chunks.join("");
+    const bytesDiscarded = await this.outputBuffer.takeDiscarded();
+    const totalBytes = raw.length + bytesDiscarded;
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(raw)),
+      bytesDiscarded,
+      totalBytes,
+      raw.length,
+    );
     const executionTime = (Date.now() - startTime) / 1000;
     this._recordReadResult(output.length, executionTime);
     return {
@@ -404,7 +456,10 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error: this._detectErrors(output) ?? null,
     };
   }
@@ -457,8 +512,15 @@ export class InteractiveSession {
     }
 
     const rawOutput = collected.join("");
+    const bytesDiscarded = await this.outputBuffer.takeDiscarded();
+    const totalBytes = rawOutput.length + bytesDiscarded;
     const executionTime = (Date.now() - startTime) / 1000;
-    const output = ANSIDecoder.cleanOpenroadOutput(rawOutput);
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(rawOutput),
+      bytesDiscarded,
+      totalBytes,
+      rawOutput.length,
+    );
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
@@ -469,7 +531,10 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error: this._detectErrors(output) ?? null,
     };
   }

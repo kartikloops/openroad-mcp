@@ -15,7 +15,10 @@ function makeExecResult(overrides: Partial<InteractiveExecResult> = {}): Interac
     timestamp: NOW,
     executionTime: 0.1,
     commandCount: 1,
-    bufferSize: 0,
+    bufferSize: 131072,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 11,
     error: null,
     ...overrides,
   };

@@ -42,6 +42,9 @@ function blankExecResult(
     executionTime: 0.0,
     commandCount: 0,
     bufferSize: 0,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 0,
     error,
   };
 }
@@ -57,6 +60,9 @@ function sessionNotFoundExecResult(
     executionTime: 0.0,
     commandCount: 0,
     bufferSize: 0,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 0,
     error: String(error),
   };
 }
@@ -73,6 +79,9 @@ function blockedError(
     executionTime: 0.0,
     commandCount: 0,
     bufferSize: 0,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 0,
     error: `CommandBlocked: '${blockedVerb}'`,
   };
   const message = `Command blocked: '${blockedVerb}' is not on the OpenROAD allowlist.\nFull command: ${pyRepr(command)}`;

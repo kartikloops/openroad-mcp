@@ -4,6 +4,9 @@
   "timestamp": "2026-01-01T00:00:00",
   "execution_time": 1.5,
   "command_count": 3,
-  "buffer_size": 2048,
+  "buffer_size": 131072,
+  "truncated": false,
+  "bytes_discarded": 0,
+  "total_bytes": 13,
   "error": null
 }
