@@ -34,6 +34,16 @@ const VERSION = (
   }
 ).version;
 
+/**
+ * Appended to both shell tool descriptions. Output that exceeds the session
+ * buffer loses its head, and a result that begins mid-line otherwise reads as
+ * a complete answer -- so the caller has to be told these fields exist.
+ */
+const TRUNCATION_FIELD_DOC =
+  "Results carry `truncated`, `bytes_discarded` and `total_bytes`: when `truncated` is true the " +
+  "output lost its beginning to the session buffer and is a PARTIAL answer, so do not treat it as " +
+  "complete — narrow the command and re-run.";
+
 function text(value: string): { content: [{ type: "text"; text: string }] } {
   return { content: [{ type: "text" as const, text: value }] };
 }
@@ -65,7 +75,8 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
       description:
         "Execute a read-only OpenROAD command (report_*, get_*, check_*, sta, help, etc.). " +
         "Use this for querying design state, generating reports, and inspecting timing. " +
-        "Commands that modify design state are blocked — use interactive_openroad_exec instead.",
+        "Commands that modify design state are blocked — use interactive_openroad_exec instead. " +
+        TRUNCATION_FIELD_DOC,
       inputSchema: {
         command: z.string(),
         session_id: z.string().optional(),
@@ -89,7 +100,8 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
         "Use this for loading designs, running placement/routing, applying constraints, and writing " +
         "output files. Only the BLOCKED_COMMANDS list (quit, socket, load, glob, etc.) is rejected; " +
         "read-only commands such as report_* are also accepted here. Use interactive_openroad_query " +
-        "instead for queries to keep state changes visible and auditable.",
+        "instead for queries to keep state changes visible and auditable. " +
+        TRUNCATION_FIELD_DOC,
       inputSchema: {
         command: z.string(),
         session_id: z.string().optional(),
