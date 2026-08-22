@@ -305,8 +305,13 @@ describe("InteractiveSession", () => {
      * sentinel. `thinkMs` is the whole point -- it reproduces a command that
      * stays quiet longer than the old 100ms completion window.
      */
-    function wirePty(opts: { thinkMs: number; output: string; emitSentinel?: boolean }): void {
-      const { thinkMs, output, emitSentinel = true } = opts;
+    function wirePty(opts: {
+      thinkMs: number;
+      output: string;
+      emitSentinel?: boolean;
+      chunkSize?: number;
+    }): void {
+      const { thinkMs, output, emitSentinel = true, chunkSize } = opts;
       (mockPty.writeInput as ReturnType<typeof vi.fn>).mockImplementation((data: string) => {
         // A terminal echoes the submitted line back as CRLF.
         void session.outputBuffer.append(data.replace(/\r$/, "\r\n"));
@@ -314,7 +319,16 @@ describe("InteractiveSession", () => {
         if (!match) return;
         const nonce = match[1]!;
         setTimeout(() => {
-          void session.outputBuffer.append(output);
+          if (chunkSize === undefined) {
+            void session.outputBuffer.append(output);
+          } else {
+            // A real PTY delivers a long report in many small reads, not one
+            // giant write; chunking reproduces the eviction pattern that
+            // actually loses output in production.
+            for (let i = 0; i < output.length; i += chunkSize) {
+              void session.outputBuffer.append(output.slice(i, i + chunkSize));
+            }
+          }
           if (emitSentinel) void session.outputBuffer.append(`ORMCP-DONE-${nonce}\r\n`);
         }, thinkMs);
       });
@@ -436,6 +450,70 @@ describe("InteractiveSession", () => {
       const result = await session.runCommand("bogus_cmd", 2000);
 
       expect(result.error).toContain("Invalid command");
+    });
+
+    describe("truncation reporting", () => {
+      // The session under test is built with a 1024-character buffer.
+      const CAP = 1024;
+
+      it("reports a complete result as untruncated and leaves output untouched", async () => {
+        wirePty({ thinkMs: 10, output: "wns max -0.485\r\n" });
+
+        const result = await session.runCommand("report_wns", 2000);
+
+        expect(result.truncated).toBe(false);
+        expect(result.bytesDiscarded).toBe(0);
+        expect(result.output).toContain("wns max -0.485");
+        expect(result.output).not.toContain("TRUNCATED");
+        expect(result.totalBytes).toBeGreaterThan(0);
+      });
+
+      it("reports buffer capacity rather than the always-zero residual", async () => {
+        // The S3 bug: buffer_size reported outputBuffer.size, but a result is
+        // only built after the buffer has been drained, so it was always 0 --
+        // the one field that could have signalled truncation was inert.
+        wirePty({ thinkMs: 10, output: "ok\r\n" });
+
+        const result = await session.runCommand("report_wns", 2000);
+
+        expect(result.bufferSize).toBe(CAP);
+      });
+
+      it("flags a result whose head was discarded and accounts for the loss", async () => {
+        const huge = "x".repeat(5000) + "\r\n";
+        wirePty({ thinkMs: 10, output: huge, chunkSize: 64 });
+
+        const result = await session.runCommand("report_checks", 2000);
+
+        expect(result.truncated).toBe(true);
+        expect(result.bytesDiscarded).toBeGreaterThan(0);
+        expect(result.totalBytes).toBeGreaterThanOrEqual(huge.length);
+        // Everything the command produced is either returned or accounted for
+        // as discarded, and what comes back never exceeds the cap.
+        expect(result.totalBytes - result.bytesDiscarded).toBeLessThanOrEqual(CAP);
+      });
+
+      it("announces the truncation inside output, where a reader cannot miss it", async () => {
+        wirePty({ thinkMs: 10, output: "x".repeat(5000) + "\r\n", chunkSize: 64 });
+
+        const result = await session.runCommand("report_checks", 2000);
+
+        expect(result.output.startsWith("[TRUNCATED:")).toBe(true);
+        expect(result.output).toContain("discarded from the START");
+        expect(result.output).toContain("may begin mid-line");
+      });
+
+      it("does not carry one command's discarded bytes into the next result", async () => {
+        wirePty({ thinkMs: 10, output: "x".repeat(5000) + "\r\n", chunkSize: 64 });
+        const truncatedResult = await session.runCommand("report_checks", 2000);
+        expect(truncatedResult.truncated).toBe(true);
+
+        wirePty({ thinkMs: 10, output: "wns max -0.485\r\n" });
+        const cleanResult = await session.runCommand("report_wns", 2000);
+
+        expect(cleanResult.truncated).toBe(false);
+        expect(cleanResult.bytesDiscarded).toBe(0);
+      });
     });
   });
 

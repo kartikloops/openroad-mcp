@@ -117,6 +117,9 @@ describe("QueryShellTool", () => {
     expect(Object.keys(result)).toContain("execution_time");
     expect(Object.keys(result)).toContain("command_count");
     expect(Object.keys(result)).toContain("buffer_size");
+    expect(Object.keys(result)).toContain("truncated");
+    expect(Object.keys(result)).toContain("bytes_discarded");
+    expect(Object.keys(result)).toContain("total_bytes");
   });
 
   it("handles SessionNotFoundError", async () => {
