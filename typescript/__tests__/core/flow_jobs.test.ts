@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 vi.mock("../../src/config/settings.js", () => {
   const state = { runLogDir: "", maxJobs: 2, flowTimeout: 3600, flowPath: "" };
@@ -53,6 +54,49 @@ function stub(name: string, body: string): string {
   fs.writeFileSync(file, `#!/bin/sh\n${body}\n`);
   fs.chmodSync(file, 0o755);
   return file;
+}
+
+/**
+ * True when a pid is gone, or is a zombie -- which is dead, just not yet
+ * reaped.
+ *
+ * `process.kill(pid, 0)` only asks whether the pid resolves, not whether it is
+ * running. When the spawner dies with the process group, its child is
+ * reparented to PID 1; in a container PID 1 often does not reap, so the killed
+ * process lingers as a zombie and stays signalable indefinitely. Treating that
+ * as "still alive" is what fails in Docker while passing on a desktop.
+ */
+function isTerminated(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return true;
+  }
+  try {
+    // Linux: field 3 of /proc/<pid>/stat, after the parenthesised comm.
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z";
+  } catch {
+    /* not Linux, or the process vanished between calls */
+  }
+  try {
+    const state = execFileSync("ps", ["-o", "state=", "-p", String(pid)], {
+      encoding: "utf8",
+    }).trim();
+    return state === "" || state.startsWith("Z");
+  } catch {
+    return true;
+  }
+}
+
+/** Poll until the process has actually stopped running, or give up. */
+async function waitForTermination(pid: number, timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (isTerminated(pid)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 /** Wait until the job leaves `running`, or fail the test. */
@@ -254,9 +298,9 @@ describe("FlowJobRegistry teardown", () => {
     registry.cancel(job.jobId);
     await settle(registry, job.jobId, 10000);
 
-    // Give the signal a moment to land on the group.
-    await new Promise((r) => setTimeout(r, 300));
-    expect(() => process.kill(grandchildPid, 0)).toThrow();
+    // Poll rather than sleep a fixed interval: teardown escalates to SIGKILL
+    // after a grace period, and a loaded CI container is slower than a desktop.
+    expect(await waitForTermination(grandchildPid)).toBe(true);
   });
 
   it("marks a cancelled run cancelled, not failed", async () => {
