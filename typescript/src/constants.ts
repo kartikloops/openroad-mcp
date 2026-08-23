@@ -20,6 +20,19 @@ export const SIGNIFICANT_LOG_THRESHOLD = 100_000;
 export const CHUNK_JOIN_THRESHOLD = 100;
 
 /**
+ * Per-session retention of recent command output, so it can be searched after
+ * the fact.
+ *
+ * The circular buffer cannot serve this: runCommand drains it to empty, so a
+ * search over the live buffer finds nothing. Retention is capped by total
+ * characters and by number of commands, oldest evicted first.
+ */
+export const OUTPUT_HISTORY_DEFAULTS = {
+  MAX_CHARS: 256 * 1024,
+  MAX_COMMANDS: 50,
+} as const;
+
+/**
  * Flow-run defaults.
  *
  * A route on a real design runs for hours, so the default timeout is measured

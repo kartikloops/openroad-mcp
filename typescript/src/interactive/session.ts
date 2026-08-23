@@ -6,6 +6,11 @@ import { getSettings } from "../config/settings.js";
 import type { Settings } from "../config/settings.js";
 import { SessionState } from "../core/models.js";
 import type {
+  SessionGrepMatch,
+  SessionGrepResult,
+  SessionOutputRecord,
+} from "../core/models.js";
+import type {
   CommandHistoryEntry,
   InteractiveExecResult,
   InteractiveSessionInfo,
@@ -15,6 +20,7 @@ import {
   BYTES_TO_MB,
   MAX_COMMAND_COMPLETION_WINDOW,
   MAX_COMMAND_HISTORY,
+  OUTPUT_HISTORY_DEFAULTS,
   PTY_LINE_TERMINATOR,
   truncationNotice,
   UTILIZATION_PERCENTAGE_BASE,
@@ -108,6 +114,19 @@ export class InteractiveSession {
   // Serialises terminate()/cleanup() so concurrent callers cannot double-kill
   // the process or deliver a stale exit code to waiters.
   private readonly _lifecycleLock = new Mutex();
+
+  /**
+   * Recent command output, kept so it can be searched after the fact.
+   *
+   * runCommand drains the circular buffer to empty, so anything searching the
+   * live buffer finds nothing once a command has returned. Retaining the
+   * cleaned output here is what makes grep over a session's results possible
+   * without re-running the command or re-sending a large result.
+   */
+  private readonly _outputHistory: SessionOutputRecord[] = [];
+  private _outputHistoryChars = 0;
+  /** Records dropped to stay inside the retention budget. */
+  private _outputHistoryEvicted = 0;
 
   constructor(sessionId: string, bufferSize?: number, private readonly _settings: Settings = getSettings()) {
     this.sessionId = sessionId;
@@ -334,6 +353,7 @@ export class InteractiveSession {
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
+    this._retainOutput(command, output);
 
     // An incomplete result outranks anything matched inside it: a command that
     // printed "Error:" and then kept running must not look like it finished.
@@ -791,23 +811,147 @@ export class InteractiveSession {
     return idleTime > idleThresholdSeconds;
   }
 
-  async filterOutput(pattern: string, maxLines = 1000): Promise<string[]> {
-    const chunks = await this.outputBuffer.peekAll();
-    if (chunks.length === 0) return [];
+  /** Keep a command's output for later searching, oldest evicted first. */
+  private _retainOutput(command: string, output: string): void {
+    if (output.length === 0) return;
 
-    const text = this.outputBuffer.toText(chunks);
-    const lines = text.split("\n");
+    const maxChars = this._settings.OUTPUT_HISTORY_CHARS ?? OUTPUT_HISTORY_DEFAULTS.MAX_CHARS;
+    const maxCommands =
+      this._settings.OUTPUT_HISTORY_COMMANDS ?? OUTPUT_HISTORY_DEFAULTS.MAX_COMMANDS;
+    if (maxChars <= 0 || maxCommands <= 0) return;
 
-    let matching: string[];
+    // A single result larger than the whole budget keeps its tail, matching
+    // how the output buffer itself sheds the head.
+    const kept = output.length > maxChars ? output.slice(output.length - maxChars) : output;
+
+    this._outputHistory.push({
+      commandNumber: this.commandCount,
+      command,
+      timestamp: new Date().toISOString(),
+      output: kept,
+      truncated: kept.length < output.length,
+    });
+    this._outputHistoryChars += kept.length;
+
+    while (
+      this._outputHistory.length > maxCommands ||
+      (this._outputHistoryChars > maxChars && this._outputHistory.length > 1)
+    ) {
+      const dropped = this._outputHistory.shift()!;
+      this._outputHistoryChars -= dropped.output.length;
+      this._outputHistoryEvicted += 1;
+    }
+  }
+
+  /**
+   * Search retained command output, plus anything still sitting unread in the
+   * live buffer.
+   *
+   * `pattern` is treated as a regular expression, falling back to a substring
+   * search when it does not compile, so a caller passing a bare net name is
+   * never met with a syntax error.
+   */
+  async grepOutput(
+    pattern: string,
+    opts: { maxMatches?: number; contextLines?: number; ignoreCase?: boolean; commandNumber?: number } = {},
+  ): Promise<SessionGrepResult> {
+    const maxMatches = opts.maxMatches ?? 200;
+    const contextLines = Math.max(0, opts.contextLines ?? 0);
+    const ignoreCase = opts.ignoreCase ?? true;
+
+    const substringTest = (line: string): boolean => {
+      const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+      return (ignoreCase ? line.toLowerCase() : line).includes(needle);
+    };
+
+    let test: (line: string) => boolean;
+    let patternKind: SessionGrepResult["patternKind"];
     try {
-      const regex = new RegExp(pattern, "i");
-      matching = lines.filter((line) => regex.test(line));
+      const regex = new RegExp(pattern, ignoreCase ? "i" : "");
+      test = (line: string): boolean => regex.test(line);
+      patternKind = "regex";
     } catch {
-      // Fallback to a case-insensitive substring search on invalid regex.
-      const needle = pattern.toLowerCase();
-      matching = lines.filter((line) => line.toLowerCase().includes(needle));
+      // An uncompilable pattern is a literal, not a user error.
+      test = substringTest;
+      patternKind = "substring";
     }
 
-    return matching.length > 0 ? matching.slice(-maxLines) : [];
+    const sources: SessionOutputRecord[] = this._outputHistory.filter(
+      (r) => opts.commandNumber === undefined || r.commandNumber === opts.commandNumber,
+    );
+    if (opts.commandNumber === undefined) {
+      // Output that has arrived but not yet been consumed by a command.
+      const pending = this.outputBuffer.toText(await this.outputBuffer.peekAll());
+      if (pending.length > 0) {
+        sources.push({
+          commandNumber: this.commandCount + 1,
+          command: "(unread buffer)",
+          timestamp: new Date().toISOString(),
+          output: pending,
+          truncated: false,
+        });
+      }
+    }
+
+    const search = (
+      predicate: (line: string) => boolean,
+    ): { matches: SessionGrepMatch[]; totalMatches: number; searchedLines: number } => {
+      const found: SessionGrepMatch[] = [];
+      let total = 0;
+      let scanned = 0;
+      for (const record of sources) {
+        const lines = record.output.split("\n");
+        scanned += lines.length;
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!predicate(lines[i]!)) continue;
+          total += 1;
+          if (found.length >= maxMatches) continue;
+          found.push({
+            commandNumber: record.commandNumber,
+            command: record.command,
+            lineNumber: i + 1,
+            line: lines[i]!,
+            ...(contextLines > 0 && {
+              before: lines.slice(Math.max(0, i - contextLines), i),
+              after: lines.slice(i + 1, i + 1 + contextLines),
+            }),
+          });
+        }
+      }
+      return { matches: found, totalMatches: total, searchedLines: scanned };
+    };
+
+    let { matches, totalMatches, searchedLines } = search(test);
+
+    // A pasted instance or net name like `dpath.a_reg[0]` is *valid* regex that
+    // matches nothing, which is worse than a syntax error: the caller is told
+    // there are no matches when it is the pattern that is wrong. Retry such a
+    // pattern literally and say that is what happened.
+    if (totalMatches === 0 && patternKind === "regex" && /[[\](){}.*+?^$|\\]/.test(pattern)) {
+      const literal = search(substringTest);
+      if (literal.totalMatches > 0) {
+        ({ matches, totalMatches, searchedLines } = literal);
+        patternKind = "substring-fallback";
+      }
+    }
+
+    return {
+      matches,
+      totalMatches,
+      // Say plainly when matches were dropped, rather than returning a capped
+      // list that reads like the whole answer.
+      truncated: totalMatches > matches.length,
+      patternKind,
+      searchedCommands: sources.length,
+      searchedLines,
+      retainedChars: this._outputHistoryChars,
+      evictedCommands: this._outputHistoryEvicted,
+    };
+  }
+
+  /** Matching lines only. Retained for callers that just want the text. */
+  async filterOutput(pattern: string, maxLines = 1000): Promise<string[]> {
+    const result = await this.grepOutput(pattern, { maxMatches: maxLines });
+    return result.matches.map((m) => m.line);
   }
 }

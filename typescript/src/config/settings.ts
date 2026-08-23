@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { FLOW_RUN_DEFAULTS, IMAGE_DEFAULTS } from "../constants.js";
+import { FLOW_RUN_DEFAULTS, IMAGE_DEFAULTS, OUTPUT_HISTORY_DEFAULTS } from "../constants.js";
 
 const TRUTHY_VALUES = ["true", "1", "yes"];
 const FALSY_VALUES = ["false", "0", "no"];
@@ -74,6 +74,10 @@ export class Settings {
   readonly MAX_FLOW_JOBS: number;
   /** Default wall-clock budget for a flow run, in seconds. */
   readonly FLOW_RUN_TIMEOUT: number;
+  /** Characters of recent command output retained per session for searching. */
+  readonly OUTPUT_HISTORY_CHARS: number;
+  /** Commands of output retained per session for searching. */
+  readonly OUTPUT_HISTORY_COMMANDS: number;
 
   constructor(overrides: Partial<Settings> = {}) {
     this.COMMAND_TIMEOUT = overrides.COMMAND_TIMEOUT ?? 30.0;
@@ -95,6 +99,9 @@ export class Settings {
     this.RUN_LOG_DIR = overrides.RUN_LOG_DIR ?? path.join(os.tmpdir(), "openroad-mcp-runs");
     this.MAX_FLOW_JOBS = overrides.MAX_FLOW_JOBS ?? FLOW_RUN_DEFAULTS.MAX_JOBS;
     this.FLOW_RUN_TIMEOUT = overrides.FLOW_RUN_TIMEOUT ?? FLOW_RUN_DEFAULTS.TIMEOUT_SECONDS;
+    this.OUTPUT_HISTORY_CHARS = overrides.OUTPUT_HISTORY_CHARS ?? OUTPUT_HISTORY_DEFAULTS.MAX_CHARS;
+    this.OUTPUT_HISTORY_COMMANDS =
+      overrides.OUTPUT_HISTORY_COMMANDS ?? OUTPUT_HISTORY_DEFAULTS.MAX_COMMANDS;
   }
 
   get flowPath(): string {
@@ -142,6 +149,8 @@ export class Settings {
       ["IMAGE_MIN_DIMENSION", "OPENROAD_IMAGE_MIN_DIMENSION", false],
       ["MAX_FLOW_JOBS", "OPENROAD_MAX_FLOW_JOBS", false],
       ["FLOW_RUN_TIMEOUT", "OPENROAD_FLOW_RUN_TIMEOUT", false],
+      ["OUTPUT_HISTORY_CHARS", "OPENROAD_OUTPUT_HISTORY_CHARS", true],
+      ["OUTPUT_HISTORY_COMMANDS", "OPENROAD_OUTPUT_HISTORY_COMMANDS", true],
     ];
     const strFields: Array<[keyof Settings, string]> = [
       ["LOG_LEVEL", "LOG_LEVEL"],

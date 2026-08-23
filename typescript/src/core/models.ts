@@ -170,6 +170,62 @@ export const SessionMetricsResult = z.object({
 });
 export type SessionMetricsResult = z.infer<typeof SessionMetricsResult>;
 
+// Session output search models
+
+/** One retained command output, searchable after the command has returned. */
+export interface SessionOutputRecord {
+  commandNumber: number;
+  command: string;
+  timestamp: string;
+  output: string;
+  /** True when the result was larger than the retention budget and lost its head. */
+  truncated: boolean;
+}
+
+export interface SessionGrepMatch {
+  commandNumber: number;
+  command: string;
+  /** 1-based line number within that command's output. */
+  lineNumber: number;
+  line: string;
+  before?: string[];
+  after?: string[];
+}
+
+export interface SessionGrepResult {
+  matches: SessionGrepMatch[];
+  /** Matches found, which exceeds matches.length when capped. */
+  totalMatches: number;
+  truncated: boolean;
+  /**
+   * How the pattern was applied: as a regex, as a literal because it did not
+   * compile, or as a literal after the regex matched nothing (a pasted net
+   * name like `dpath.a_reg[0]` is valid regex that matches nothing).
+   */
+  patternKind: "regex" | "substring" | "substring-fallback";
+  searchedCommands: number;
+  searchedLines: number;
+  retainedChars: number;
+  /** Commands whose output was evicted to stay inside the retention budget. */
+  evictedCommands: number;
+}
+
+export const SessionGrepOutputResult = z.object({
+  sessionId: z.string().nullable().default(null),
+  pattern: z.string().nullable().default(null),
+  matches: z.array(z.custom<SessionGrepMatch>()).default([]),
+  totalMatches: z.number().default(0),
+  truncated: z.boolean().default(false),
+  patternKind: z.string().nullable().default(null),
+  searchedCommands: z.number().default(0),
+  searchedLines: z.number().default(0),
+  retainedChars: z.number().default(0),
+  evictedCommands: z.number().default(0),
+  message: z.string().nullable().default(null),
+  error: errorField,
+});
+export type SessionGrepOutputResult = z.infer<typeof SessionGrepOutputResult>;
+
 // ORFS metrics models
 
 /** One stage's metrics file, as read from logs/<platform>/<design>/<variant>. */
