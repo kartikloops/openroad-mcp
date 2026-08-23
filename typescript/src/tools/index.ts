@@ -9,6 +9,7 @@ export {
   SessionHistoryTool,
   SessionMetricsTool,
   TerminateSessionTool,
+  GrepSessionOutputTool,
 } from "./interactive.js";
 export { ListReportImagesTool, ReadReportImageTool, classifyImageType, validatePlatformDesign } from "./report_images.js";
 export {

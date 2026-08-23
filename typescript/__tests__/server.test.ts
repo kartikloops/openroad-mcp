@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   "run_orfs_stage",
   "get_orfs_job",
   "cancel_orfs_job",
+  "grep_session_output",
 ].sort();
 
 /** Minimal manager stub: listing tools needs no calls; one round-trip uses listSessions. */
@@ -41,7 +42,7 @@ async function connectClient(manager: OpenROADManager): Promise<Client> {
 }
 
 describe("createMcpServer over MCP", () => {
-  it("enumerates exactly the 14 expected tools", async () => {
+  it("enumerates exactly the 15 expected tools", async () => {
     const client = await connectClient(makeMockManager());
     const { tools } = await client.listTools();
 

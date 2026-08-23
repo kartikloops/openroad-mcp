@@ -19,6 +19,7 @@ import {
   SessionHistoryTool,
   SessionMetricsTool,
   TerminateSessionTool,
+  GrepSessionOutputTool,
 } from "./tools/interactive.js";
 import { ListReportImagesTool, ReadReportImageTool } from "./tools/report_images.js";
 import { ReadOrfsMetricsTool } from "./tools/orfs_metrics.js";
@@ -52,7 +53,7 @@ function text(value: string): { content: [{ type: "text"; text: string }] } {
 }
 
 /**
- * Build an McpServer with all 14 tools registered. Accepts an optional manager
+ * Build an McpServer with all 15 tools registered. Accepts an optional manager
  * so tests can inject an isolated/mocked one; defaults to the module singleton.
  *
  * Tool names, descriptions, input params, and annotations mirror the Python
@@ -71,6 +72,7 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   const sessionMetricsTool = new SessionMetricsTool(manager);
   const listReportImagesTool = new ListReportImagesTool(manager);
   const readReportImageTool = new ReadReportImageTool(manager);
+  const grepSessionOutputTool = new GrepSessionOutputTool(manager);
   const readOrfsMetricsTool = new ReadOrfsMetricsTool(manager);
   const runOrfsStageTool = new RunOrfsStageTool(manager);
   const getOrfsJobTool = new GetOrfsJobTool(manager);
@@ -278,6 +280,44 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
       );
       return { content: blocks, ...(isError && { isError: true }) };
     },
+  );
+
+  mcp.registerTool(
+    "grep_session_output",
+    {
+      description:
+        "Search the output of commands already run in a session, without re-running them or " +
+        "re-sending a large result. `pattern` is a regular expression, falling back to a substring " +
+        "search if it does not compile. Use `context_lines` to see surrounding lines and " +
+        "`command_number` to search one command's output. Only recent output is retained " +
+        "(OPENROAD_OUTPUT_HISTORY_CHARS, default 256 KB); the result reports how much was searched " +
+        "and whether older output has been evicted.",
+      inputSchema: {
+        session_id: z.string(),
+        pattern: z.string(),
+        max_matches: z.number().int().positive().optional(),
+        context_lines: z.number().int().nonnegative().optional(),
+        ignore_case: z.boolean().optional(),
+        command_number: z.number().int().positive().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      text(
+        await grepSessionOutputTool.execute(
+          args.session_id,
+          args.pattern,
+          args.max_matches,
+          args.context_lines,
+          args.ignore_case,
+          args.command_number,
+        ),
+      ),
   );
 
   mcp.registerTool(

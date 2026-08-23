@@ -5,6 +5,7 @@ import {
 } from "../config/command_whitelist.js";
 import type { OpenROADManager } from "../core/manager.js";
 import {
+  SessionGrepOutputResult,
   InteractiveSessionListResult,
   SessionHistoryResult,
   SessionInspectionResult,
@@ -433,3 +434,69 @@ export class SessionMetricsTool extends BaseTool {
 }
 
 export const InteractiveShellTool = QueryShellTool;
+
+/**
+ * Search a session's recent command output.
+ *
+ * The alternative is re-sending a large result just to find a few lines in it:
+ * a single `report_checks` came back at 131 KB in the capability study, and the
+ * agent had to work through the whole thing to rank a handful of paths.
+ */
+export class GrepSessionOutputTool extends BaseTool {
+  constructor(manager: OpenROADManager) {
+    super(manager);
+  }
+
+  async execute(
+    sessionId: string,
+    pattern: string,
+    maxMatches?: number | null,
+    contextLines?: number | null,
+    ignoreCase?: boolean | null,
+    commandNumber?: number | null,
+  ): Promise<string> {
+    try {
+      const result = await this.manager.grepSessionOutput(sessionId, pattern, {
+        ...(maxMatches != null && { maxMatches }),
+        ...(contextLines != null && { contextLines }),
+        ...(ignoreCase != null && { ignoreCase }),
+        ...(commandNumber != null && { commandNumber }),
+      });
+
+      const message =
+        result.searchedCommands === 0
+          ? "No command output is retained for this session yet. Run a command first."
+          : result.truncated
+            ? `Showing ${result.matches.length} of ${result.totalMatches} matches; raise max_matches or narrow the pattern.`
+            : null;
+
+      return this.formatResult(
+        SessionGrepOutputResult.parse({
+          sessionId,
+          pattern,
+          ...result,
+          message,
+        }) as unknown as Record<string, unknown>,
+      );
+    } catch (e) {
+      if (e instanceof SessionNotFoundError) {
+        return this.formatResult(
+          SessionGrepOutputResult.parse({
+            sessionId,
+            pattern,
+            error: "SessionNotFound",
+            message: (e as Error).message,
+          }) as unknown as Record<string, unknown>,
+        );
+      }
+      return this.formatResult(
+        SessionGrepOutputResult.parse({
+          sessionId,
+          pattern,
+          error: "UnexpectedError",
+          message: (e as Error).message ?? String(e),
+        }) as unknown as Record<string, unknown>,
+      );
+    }
+  }
+}

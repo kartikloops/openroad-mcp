@@ -88,6 +88,40 @@
       "openWorldHint": false
     }
   },
+  "grep_session_output": {
+    "params": {
+      "session_id": {
+        "type": "string",
+        "required": true
+      },
+      "pattern": {
+        "type": "string",
+        "required": true
+      },
+      "max_matches": {
+        "type": "integer",
+        "required": false
+      },
+      "context_lines": {
+        "type": "integer",
+        "required": false
+      },
+      "ignore_case": {
+        "type": "boolean",
+        "required": false
+      },
+      "command_number": {
+        "type": "integer",
+        "required": false
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
   "inspect_interactive_session": {
     "params": {
       "session_id": {
