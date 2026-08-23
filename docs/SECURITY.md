@@ -163,6 +163,8 @@ All variables are read at startup by [`typescript/src/config/settings.ts`](../ty
 | `OPENROAD_IMAGE_MAX_BASE64_KB` | integer (KB) | `1024` | Report-image payload budget; override per-call with `max_size_kb` |
 | `OPENROAD_IMAGE_MAX_DIMENSION` | integer (pixels) | `1568` | Longest edge an image is capped to before encoding |
 | `OPENROAD_IMAGE_MIN_DIMENSION` | integer (pixels) | `512` | Floor below which the resize ladder will not shrink |
+| `OPENROAD_OUTPUT_HISTORY_CHARS` | integer (chars) | `262144` (256 KB) | Recent command output retained per session for `grep_session_output`; `0` disables |
+| `OPENROAD_OUTPUT_HISTORY_COMMANDS` | integer | `50` | Commands of output retained per session; `0` disables |
 | `OPENROAD_MAX_FLOW_JOBS` | integer | `2` | Concurrent `run_orfs_stage` runs allowed |
 | `OPENROAD_FLOW_RUN_TIMEOUT` | float (seconds) | `21600` (6 h) | Default wall-clock budget for a flow run |
 | `OPENROAD_RUN_LOG_DIR` | path | `<tmpdir>/openroad-mcp-runs` | Where flow-run logs are streamed |

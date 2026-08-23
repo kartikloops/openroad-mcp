@@ -27,6 +27,7 @@ make golden
   - [inspect_interactive_session](#inspect_interactive_session)
   - [get_session_history](#get_session_history)
   - [get_session_metrics](#get_session_metrics)
+  - [grep_session_output](#grep_session_output)
 - [Report Image Tools](#report-image-tools)
   - [list_report_images](#list_report_images)
   - [read_report_image](#read_report_image)
@@ -425,6 +426,68 @@ No parameters.
 
 ---
 
+### `grep_session_output`
+
+Search the output of commands already run in a session, without re-running them or re-sending a
+large result.
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `session_id` | string | **yes** | — |
+| `pattern` | string | **yes** | — |
+| `max_matches` | integer | no | `200` |
+| `context_lines` | integer | no | `0` |
+| `ignore_case` | boolean | no | `true` |
+| `command_number` | integer | no | — (all retained commands) |
+
+```json
+{
+  "session_id": "a1b2c3d4",
+  "pattern": "wns",
+  "matches": [
+    { "command_number": 1, "command": "report_checks", "line_number": 42, "line": "wns max -0.485" }
+  ],
+  "total_matches": 1,
+  "truncated": false,
+  "pattern_kind": "regex",
+  "searched_commands": 1,
+  "searched_lines": 900,
+  "retained_chars": 131166,
+  "evicted_commands": 0,
+  "message": null,
+  "error": null
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `total_matches` | Matches found, which exceeds `matches.length` when capped by `max_matches` |
+| `truncated` | `true` when matches were dropped — the list is not the whole answer |
+| `pattern_kind` | How the pattern was applied; see below |
+| `searched_commands` / `searched_lines` | How much was actually searched |
+| `retained_chars` | Characters of output currently held for this session |
+| `evicted_commands` | Commands whose output has aged out of the retention budget |
+
+**Pattern handling.** `pattern` is a regular expression. `pattern_kind` reports what actually
+happened:
+
+- `regex` — compiled and applied as a regex.
+- `substring` — the pattern did not compile, so it was applied literally. Pasting a raw name is not
+  treated as a user error.
+- `substring-fallback` — the pattern compiled *and matched nothing*, and it contains regex
+  metacharacters, so it was retried literally and that found matches. A pasted instance name like
+  `dpath.a_reg[0]` is valid regex meaning "…`a_reg` followed by `0`", which silently matches
+  nothing — worse than a syntax error, because you would be told there are no matches when it is
+  the pattern that is wrong.
+
+> **Only recent output is searchable.** `runCommand` drains the session's circular buffer, so the
+> live buffer holds nothing once a command has returned. Output is therefore retained separately,
+> bounded by `OPENROAD_OUTPUT_HISTORY_CHARS` (default 256 KB) and
+> `OPENROAD_OUTPUT_HISTORY_COMMANDS` (default 50), oldest evicted first. `evicted_commands` tells
+> you when something has aged out. A single result larger than the whole budget keeps its tail.
+
+---
+
 ## Report Image Tools
 
 ### `list_report_images`
@@ -799,6 +862,8 @@ server shutdown.
 | Report-image payload | 1024 KB base64 | `OPENROAD_IMAGE_MAX_BASE64_KB` |
 | Report-image longest edge | 1568 px | `OPENROAD_IMAGE_MAX_DIMENSION` |
 | Report-image resize floor | 512 px | `OPENROAD_IMAGE_MIN_DIMENSION` |
+| Searchable output per session | 256 KB | `OPENROAD_OUTPUT_HISTORY_CHARS` |
+| Searchable commands per session | 50 | `OPENROAD_OUTPUT_HISTORY_COMMANDS` |
 | Concurrent flow runs | 2 | `OPENROAD_MAX_FLOW_JOBS` |
 | Flow run timeout | 6 h | `OPENROAD_FLOW_RUN_TIMEOUT` |
 | Flow run log directory | `<tmpdir>/openroad-mcp-runs` | `OPENROAD_RUN_LOG_DIR` |
