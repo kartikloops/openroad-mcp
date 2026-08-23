@@ -103,8 +103,15 @@ describe("Token Efficiency", () => {
       InteractiveSessionListResult.parse({ sessions: [], totalCount: 0, activeCount: 0, error: null }) as unknown as Record<string, unknown>,
     );
     // Token counts (floor(len/4)) measured on first run - update if schema changes.
-    expect(tokenEstimate(minimal)).toBeLessThanOrEqual(45);   // ~37 chars baseline
-    expect(tokenEstimate(emptyList)).toBeLessThanOrEqual(20); // ~57 chars baseline
+    //
+    // Raised from 45 when a command result gained truncated / bytes_discarded /
+    // total_bytes: 148 -> 202 chars, 37 -> 50 tokens. That ~13-token cost is
+    // paid on every result and is deliberate -- the three fields together are
+    // what let a caller prove a result is complete rather than assume it, and
+    // reporting them only on truncation would remove that evidence from the
+    // common path.
+    expect(tokenEstimate(minimal)).toBeLessThanOrEqual(55);   // 202 chars
+    expect(tokenEstimate(emptyList)).toBeLessThanOrEqual(20); // 61 chars
   });
 });
 
