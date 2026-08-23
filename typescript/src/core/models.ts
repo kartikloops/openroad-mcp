@@ -170,6 +170,47 @@ export const SessionMetricsResult = z.object({
 });
 export type SessionMetricsResult = z.infer<typeof SessionMetricsResult>;
 
+// ORFS metrics models
+
+/** One stage's metrics file, as read from logs/<platform>/<design>/<variant>. */
+export interface OrfsStageMetrics {
+  stage: string;
+  metricsPath: string | null;
+  metrics: Record<string, unknown>;
+  /**
+   * Metric keys the file recorded more than once, whose values are therefore
+   * arrays. ORFS appends a block per sub-run, so this is normal rather than
+   * corruption -- but a caller must know which keys are arrays.
+   */
+  repeatedMetrics: string[];
+  log: {
+    path: string;
+    errors: string[];
+    warnings: string[];
+    errorCount: number;
+    warningCount: number;
+    truncated: boolean;
+  } | null;
+  error?: string | null;
+}
+
+export const OrfsMetricsResult = z.object({
+  platform: z.string().nullable().default(null),
+  design: z.string().nullable().default(null),
+  variant: z.string().nullable().default(null),
+  stage: z.string().nullable().default(null),
+  logsPath: z.string().nullable().default(null),
+  stages: z.array(z.custom<OrfsStageMetrics>()).default([]),
+  availableStages: z.array(z.string()).default([]),
+  gates: z.array(z.custom<unknown>()).default([]),
+  unmatchedGates: z.array(z.custom<unknown>()).default([]),
+  gateSummary: z.custom<unknown>().nullable().default(null),
+  rulesPath: z.string().nullable().default(null),
+  message: z.string().nullable().default(null),
+  error: errorField,
+});
+export type OrfsMetricsResult = z.infer<typeof OrfsMetricsResult>;
+
 // Image models
 
 export const ImageInfo = z.object({
