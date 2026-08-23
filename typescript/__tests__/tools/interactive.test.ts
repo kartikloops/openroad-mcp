@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Mock } from "vitest";
-import { QueryShellTool, ExecShellTool, ListSessionsTool, CreateSessionTool, TerminateSessionTool, InspectSessionTool, SessionHistoryTool, SessionMetricsTool, InteractiveShellTool } from "../../src/tools/interactive.js";
+import { GrepSessionOutputTool, QueryShellTool, ExecShellTool, ListSessionsTool, CreateSessionTool, TerminateSessionTool, InspectSessionTool, SessionHistoryTool, SessionMetricsTool, InteractiveShellTool } from "../../src/tools/interactive.js";
 import type { OpenROADManager } from "../../src/core/manager.js";
 import { SessionNotFoundError, SessionTerminatedError, SessionError } from "../../src/interactive/models.js";
 import { SessionState } from "../../src/core/models.js";
@@ -472,5 +472,89 @@ describe("Snapshots: wire format stability", () => {
     mgr.listSessions.mockResolvedValue([makeSessionInfo()]);
     const raw = await new ListSessionsTool(mgr as unknown as OpenROADManager).execute();
     expect(raw).toMatchSnapshot();
+  });
+});
+
+describe("GrepSessionOutputTool", () => {
+  function makeManager(over: Partial<Record<string, unknown>> = {}): OpenROADManager {
+    return {
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [
+          { commandNumber: 1, command: "report_checks", lineNumber: 42, line: "wns max -0.485" },
+        ],
+        totalMatches: 1,
+        truncated: false,
+        patternKind: "regex",
+        searchedCommands: 1,
+        searchedLines: 900,
+        retainedChars: 131166,
+        evictedCommands: 0,
+      }),
+      ...over,
+    } as unknown as OpenROADManager;
+  }
+
+  it("returns matches with their command and line number in snake_case", async () => {
+    const raw = await new GrepSessionOutputTool(makeManager()).execute("s1", "wns");
+    const result = JSON.parse(raw);
+
+    expect(result.error).toBeNull();
+    expect(result.total_matches).toBe(1);
+    expect(result.matches[0]).toMatchObject({
+      command_number: 1,
+      command: "report_checks",
+      line_number: 42,
+      line: "wns max -0.485",
+    });
+    expect(result.searched_lines).toBe(900);
+  });
+
+  it("forwards the search options it was given", async () => {
+    const mgr = makeManager();
+    await new GrepSessionOutputTool(mgr).execute("s1", "wns", 10, 2, false, 3);
+
+    expect(mgr.grepSessionOutput).toHaveBeenCalledWith("s1", "wns", {
+      maxMatches: 10,
+      contextLines: 2,
+      ignoreCase: false,
+      commandNumber: 3,
+    });
+  });
+
+  it("says plainly when matches were capped", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [], totalMatches: 500, truncated: true, patternKind: "regex",
+        searchedCommands: 2, searchedLines: 9000, retainedChars: 1000, evictedCommands: 0,
+      }),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s1", "slack"));
+
+    expect(result.truncated).toBe(true);
+    expect(result.message).toMatch(/of 500 matches/);
+  });
+
+  it("explains an empty search rather than looking like a clean miss", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [], totalMatches: 0, truncated: false, patternKind: "regex",
+        searchedCommands: 0, searchedLines: 0, retainedChars: 0, evictedCommands: 0,
+      }),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s1", "wns"));
+
+    expect(result.message).toMatch(/No command output is retained/);
+  });
+
+  it("reports a missing session as a structured error", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockRejectedValue(new SessionNotFoundError("nope", "s9")),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s9", "wns"));
+
+    expect(result.error).toBe("SessionNotFound");
   });
 });

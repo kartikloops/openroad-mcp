@@ -1012,3 +1012,201 @@ describe("InteractiveSession", () => {
     });
   });
 });
+
+describe("InteractiveSession output search", () => {
+  let session: InteractiveSession;
+
+  const NONCE_RE = /join \{ORMCP DONE (\S+)\}/;
+
+  function makePty(target: InteractiveSession, nextOutput: () => string): PtyHandler {
+    return {
+      isProcessAlive: vi.fn().mockReturnValue(true),
+      createSession: vi.fn().mockResolvedValue(undefined),
+      writeInput: vi.fn().mockImplementation((data: string) => {
+        void target.outputBuffer.append(data.replace(/\r$/, "\r\n"));
+        const m = NONCE_RE.exec(data);
+        if (!m) return;
+        setTimeout(() => {
+          void target.outputBuffer.append(nextOutput());
+          void target.outputBuffer.append(`ORMCP-DONE-${m[1]}\r\n`);
+        }, 5);
+      }),
+      terminateProcess: vi.fn().mockResolvedValue(undefined),
+      cleanup: vi.fn().mockResolvedValue(undefined),
+      waitForExit: vi.fn().mockResolvedValue(null),
+      validateCommand: vi.fn(),
+    } as unknown as PtyHandler;
+  }
+
+  beforeEach(async () => {
+    session = new InteractiveSession("grep-session", 65536);
+    session.pty = makePty(session, () => "");
+  });
+
+  afterEach(async () => {
+    await session.cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("finds output from a command that has already returned", async () => {
+    // The regression: runCommand drains the circular buffer to empty, so a
+    // search over the live buffer alone finds nothing once the command is done.
+    let out = "wns max -0.485\r\ntns max -12.3\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    const result = await session.runCommand("report_checks", 2000);
+    expect(result.output).toContain("wns max -0.485");
+
+    expect(session.outputBuffer.size).toBe(0);
+    const grep = await session.grepOutput("wns");
+
+    expect(grep.matches).toHaveLength(1);
+    expect(grep.matches[0]!.line).toContain("wns max -0.485");
+    expect(grep.matches[0]!.command).toBe("report_checks");
+  });
+
+  it("searches across several commands and attributes each match", async () => {
+    let out = "cts__timing__setup__ws 0.1\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_cts", 2000);
+    out = "finish__timing__setup__ws -0.4\r\n";
+    await session.runCommand("report_finish", 2000);
+
+    const grep = await session.grepOutput("setup__ws");
+
+    expect(grep.totalMatches).toBe(2);
+    expect(grep.searchedCommands).toBe(2);
+    expect(grep.matches.map((m) => m.command)).toEqual(["report_cts", "report_finish"]);
+    expect(grep.matches[0]!.commandNumber).not.toBe(grep.matches[1]!.commandNumber);
+  });
+
+  it("can be scoped to one command's output", async () => {
+    let out = "shared marker A\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("first", 2000);
+    out = "shared marker B\r\n";
+    await session.runCommand("second", 2000);
+
+    const all = await session.grepOutput("shared marker");
+    const scoped = await session.grepOutput("shared marker", {
+      commandNumber: all.matches[1]!.commandNumber,
+    });
+
+    expect(all.totalMatches).toBe(2);
+    expect(scoped.totalMatches).toBe(1);
+    expect(scoped.matches[0]!.command).toBe("second");
+  });
+
+  it("returns surrounding lines when context is requested", async () => {
+    let out = "row one\r\nrow two\r\nTARGET row\r\nrow four\r\nrow five\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_checks", 2000);
+
+    const grep = await session.grepOutput("TARGET", { contextLines: 2 });
+
+    expect(grep.matches[0]!.before).toEqual(["row one", "row two"]);
+    expect(grep.matches[0]!.after).toEqual(["row four", "row five"]);
+  });
+
+  it("reports its own capping instead of returning a capped list as the whole answer", async () => {
+    let out = Array.from({ length: 40 }, (_, i) => `slack path ${i}`).join("\r\n") + "\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_checks", 2000);
+
+    const grep = await session.grepOutput("slack path", { maxMatches: 5 });
+
+    expect(grep.matches).toHaveLength(5);
+    expect(grep.totalMatches).toBe(40);
+    expect(grep.truncated).toBe(true);
+  });
+
+  it("treats an uncompilable pattern as a literal rather than erroring", async () => {
+    let out = "net dpath.a_reg[0 loaded\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_net", 2000);
+
+    const grep = await session.grepOutput("dpath.a_reg[0");
+
+    expect(grep.patternKind).toBe("substring");
+    expect(grep.totalMatches).toBe(1);
+  });
+
+  it("retries literally when a valid regex matches nothing", async () => {
+    // `dpath.a_reg[0]` compiles fine but means "…a_reg followed by 0", so it
+    // matches nothing -- worse than a syntax error, because the caller is told
+    // there are no matches when it is the pattern that is wrong.
+    let out = "net dpath.a_reg[0] loaded\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_net", 2000);
+
+    const grep = await session.grepOutput("dpath.a_reg[0]");
+
+    expect(grep.patternKind).toBe("substring-fallback");
+    expect(grep.totalMatches).toBe(1);
+    expect(grep.matches[0]!.line).toContain("dpath.a_reg[0]");
+  });
+
+  it("does not fall back when the regex genuinely matches nothing", async () => {
+    let out = "nothing of interest here\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report_net", 2000);
+
+    const grep = await session.grepOutput("wns.*slack");
+
+    expect(grep.patternKind).toBe("regex");
+    expect(grep.totalMatches).toBe(0);
+  });
+
+  it("honours case sensitivity when asked", async () => {
+    let out = "Error: bad\r\nerror: worse\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("report", 2000);
+
+    expect((await session.grepOutput("Error")).totalMatches).toBe(2);
+    expect((await session.grepOutput("Error", { ignoreCase: false })).totalMatches).toBe(1);
+  });
+
+  it("evicts the oldest output to stay inside the retention budget, and says so", async () => {
+    const settings = new Settings({ OUTPUT_HISTORY_COMMANDS: 2, OUTPUT_HISTORY_CHARS: 1_000_000 });
+    session = new InteractiveSession("evicting", 65536, settings);
+    let out = "marker one\r\n";
+    session.pty = makePty(session, () => out);
+    await session.start(["openroad"]);
+    await session.runCommand("first", 2000);
+    out = "marker two\r\n";
+    await session.runCommand("second", 2000);
+    out = "marker three\r\n";
+    await session.runCommand("third", 2000);
+
+    const grep = await session.grepOutput("marker");
+
+    expect(grep.totalMatches).toBe(2);
+    expect(grep.evictedCommands).toBe(1);
+    expect(grep.matches.map((m) => m.line.trim())).toEqual(["marker two", "marker three"]);
+  });
+
+  it("searches output still sitting unread in the buffer", async () => {
+    await session.outputBuffer.append("pending wns -0.9\n");
+
+    const grep = await session.grepOutput("wns");
+
+    expect(grep.totalMatches).toBe(1);
+    expect(grep.matches[0]!.command).toBe("(unread buffer)");
+  });
+
+  it("reports an empty search rather than pretending nothing matched", async () => {
+    const grep = await session.grepOutput("anything");
+
+    expect(grep.totalMatches).toBe(0);
+    expect(grep.searchedCommands).toBe(0);
+    expect(grep.retainedChars).toBe(0);
+  });
+});
