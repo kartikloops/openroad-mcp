@@ -11,3 +11,12 @@ export {
   TerminateSessionTool,
 } from "./interactive.js";
 export { ListReportImagesTool, ReadReportImageTool, classifyImageType, validatePlatformDesign } from "./report_images.js";
+export {
+  ReadOrfsMetricsTool,
+  parseMetricsPreservingDuplicates,
+  resolvePlatform,
+  resolveStages,
+  evaluateGates,
+  compareGate,
+  extractLogDiagnostics,
+} from "./orfs_metrics.js";

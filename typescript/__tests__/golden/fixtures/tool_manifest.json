@@ -149,6 +149,32 @@
       "openWorldHint": false
     }
   },
+  "read_orfs_metrics": {
+    "params": {
+      "design": {
+        "type": "string",
+        "required": true
+      },
+      "stage": {
+        "type": "string",
+        "required": false
+      },
+      "platform": {
+        "type": "string",
+        "required": false
+      },
+      "variant": {
+        "type": "string",
+        "required": false
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
   "read_report_image": {
     "params": {
       "platform": {

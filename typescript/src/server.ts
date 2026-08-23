@@ -21,6 +21,7 @@ import {
   TerminateSessionTool,
 } from "./tools/interactive.js";
 import { ListReportImagesTool, ReadReportImageTool } from "./tools/report_images.js";
+import { ReadOrfsMetricsTool } from "./tools/orfs_metrics.js";
 
 const logger = getLogger("server");
 
@@ -49,7 +50,7 @@ function text(value: string): { content: [{ type: "text"; text: string }] } {
 }
 
 /**
- * Build an McpServer with all 10 tools registered. Accepts an optional manager
+ * Build an McpServer with all 11 tools registered. Accepts an optional manager
  * so tests can inject an isolated/mocked one; defaults to the module singleton.
  *
  * Tool names, descriptions, input params, and annotations mirror the Python
@@ -68,6 +69,7 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   const sessionMetricsTool = new SessionMetricsTool(manager);
   const listReportImagesTool = new ListReportImagesTool(manager);
   const readReportImageTool = new ReadReportImageTool(manager);
+  const readOrfsMetricsTool = new ReadOrfsMetricsTool(manager);
 
   mcp.registerTool(
     "interactive_openroad_query",
@@ -271,6 +273,42 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
       );
       return { content: blocks, ...(isError && { isError: true }) };
     },
+  );
+
+  mcp.registerTool(
+    "read_orfs_metrics",
+    {
+      description:
+        "Read an ORFS design's per-stage metrics, its rules-base.json gate thresholds evaluated " +
+        "against those metrics, and the tagged errors/warnings from each stage log. Prefer this " +
+        "over shelling out to find/cat/jq/grep in the flow tree. `stage` accepts a step name " +
+        "(cts, place, route, floorplan, synth, finish), an ORFS metric namespace " +
+        "(globalroute, detailedroute, placeopt, detailedplace), an exact file stem (4_1_cts), or " +
+        "`all` (the default). `platform` is inferred from `design` when unambiguous. Note that " +
+        "ORFS records some metrics once per sub-run: any key listed in `repeated_metrics` has an " +
+        "array of values in file order rather than a scalar.",
+      inputSchema: {
+        design: z.string(),
+        stage: z.string().optional(),
+        platform: z.string().optional(),
+        variant: z.string().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      text(
+        await readOrfsMetricsTool.execute(
+          args.design,
+          args.stage,
+          args.platform,
+          args.variant,
+        ),
+      ),
   );
 
   return mcp;
