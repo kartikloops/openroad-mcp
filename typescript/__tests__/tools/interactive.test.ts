@@ -139,6 +139,19 @@ describe("QueryShellTool", () => {
     expect(Object.keys(converted)).toContain("session_id");
   });
 
+  it("leaves an ORFS metric key carrying a mixed-case site name intact", async () => {
+    // Observed in a real run: the key is mostly lowercase, so a
+    // "has no lowercase letters" guard does not protect it, and the site name
+    // after the colon was rewritten to gibberish.
+    const converted = toSnakeCase({
+      "cts__design__rows:FreePDK45_38x28_10R_NP_162NW_34o": 23,
+    }) as Record<string, unknown>;
+
+    expect(Object.keys(converted)).toEqual([
+      "cts__design__rows:FreePDK45_38x28_10R_NP_162NW_34o",
+    ]);
+  });
+
   it("handles SessionNotFoundError", async () => {
     mgr.executeCommand.mockRejectedValue(new SessionNotFoundError("not found", "session-1"));
     const raw = await tool.execute("help", "session-1");

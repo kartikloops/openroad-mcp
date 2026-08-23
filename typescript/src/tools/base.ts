@@ -1,11 +1,18 @@
 import type { OpenROADManager } from "../core/manager.js";
 
 function camelToSnakeKey(key: string): string {
-  // A key with no lowercase letters is not camelCase -- it is a SCREAMING_SNAKE
-  // identifier that arrived as data, such as an ORFS make variable
-  // (CTS_CLUSTER_SIZE). Converting it produces _c_t_s__c_l_u_s_t_e_r__s_i_z_e
-  // and destroys a name the caller has to be able to read back.
-  if (!/[a-z]/.test(key)) return key;
+  // camelCase never contains an underscore or a colon, so a key that does is
+  // not a field name -- it is data that happens to be an object key, and
+  // rewriting it destroys a name the caller has to be able to read back.
+  //
+  // Two real cases this protects, both seen in live runs: an ORFS make
+  // variable (CTS_CLUSTER_SIZE, which became _c_t_s__c_l_u_s_t_e_r__s_i_z_e)
+  // and an ORFS metric key carrying a site name
+  // (cts__design__rows:FreePDK45_38x28_10R_NP_162NW_34o, which became
+  // ...rows:_free_p_d_k45_38x28_10_r__n_p_162_n_w_34_o). The second is why
+  // "has no lowercase letters" was not a sufficient test: the key is mostly
+  // lowercase and only the payload after the colon is mixed case.
+  if (key.includes("_") || key.includes(":")) return key;
   return key.replace(/[A-Z]/g, (ch) => `_${ch.toLowerCase()}`);
 }
 
