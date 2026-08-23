@@ -104,12 +104,17 @@ function collectResults(job: FlowJob): {
     return { stages: [], gates: [], gateSummary: null };
   }
 
+  // Only count metrics this run actually produced. A `make` that finds its
+  // target up to date exits in milliseconds having written nothing, and the
+  // stage files from a previous run are still on disk -- reporting those as
+  // this job's results turns "nothing happened" into a green QoR report.
+  const startedMs = Date.parse(job.startedAt);
   const selected = resolveStages(stems, job.spec.target);
   const stages = selected.flatMap((stem) => {
+    const metricsPath = path.join(job.logsDir, `${stem}.json`);
     try {
-      const parsed = parseMetricsPreservingDuplicates(
-        fs.readFileSync(path.join(job.logsDir, `${stem}.json`), "utf8"),
-      );
+      if (fs.statSync(metricsPath).mtimeMs < startedMs) return [];
+      const parsed = parseMetricsPreservingDuplicates(fs.readFileSync(metricsPath, "utf8"));
       return [{ stage: stem, metrics: parsed.metrics, repeatedMetrics: parsed.repeatedMetrics }];
     } catch {
       return [];

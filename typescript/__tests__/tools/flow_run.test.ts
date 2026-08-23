@@ -232,16 +232,20 @@ describe("RunOrfsStageTool", () => {
     const logsDir = path.join(tmpDir, "logs", "nangate45", "gcd", "base");
     fs.mkdirSync(logsDir, { recursive: true });
     fs.writeFileSync(
-      path.join(logsDir, "4_1_cts.json"),
-      `{"cts__utilization__before__dpl": 76.7787,
-        "cts__utilization__before__dpl": 82.1146,
-        "cts__timing__setup__ws": -0.113089}`,
-    );
-    fs.writeFileSync(
       path.join(tmpDir, "designs", "nangate45", "gcd", "rules-base.json"),
       JSON.stringify({ "cts__timing__setup__ws": { value: -0.0529, compare: ">=" } }),
     );
-    const registry = new FlowJobRegistry(stub("quick.sh", "echo ok"));
+    // Written by the run itself, as ORFS would: results are only attributed to
+    // a job when the stage file postdates the job's start.
+    const registry = new FlowJobRegistry(
+      stub(
+        "writes_cts.sh",
+        `cat > ${path.join(logsDir, "4_1_cts.json")} <<'JSON'\n` +
+          `{"cts__utilization__before__dpl": 76.7787,\n` +
+          ` "cts__utilization__before__dpl": 82.1146,\n` +
+          ` "cts__timing__setup__ws": -0.113089}\nJSON`,
+      ),
+    );
 
     const result = JSON.parse(
       await tool(registry).execute("gcd", "cts", null, null, "base", 8),
@@ -256,6 +260,50 @@ describe("RunOrfsStageTool", () => {
 });
 
 describe("GetOrfsJobTool and CancelOrfsJobTool", () => {
+  it("does not report a previous run's metrics as this job's results", async () => {
+    // `make` with an up-to-date target exits in milliseconds having written
+    // nothing. The stage files from the last run are still on disk, and
+    // returning them turns "nothing happened" into a green QoR report.
+    const logsDir = path.join(tmpDir, "logs", "nangate45", "gcd", "base");
+    fs.mkdirSync(logsDir, { recursive: true });
+    const stale = path.join(logsDir, "4_1_cts.json");
+    fs.writeFileSync(stale, `{"cts__timing__setup__ws": -0.1}`);
+    const old = new Date(Date.now() - 3_600_000);
+    fs.utimesSync(stale, old, old);
+    fs.writeFileSync(
+      path.join(tmpDir, "designs", "nangate45", "gcd", "rules-base.json"),
+      JSON.stringify({ "cts__timing__setup__ws": { value: -0.5, compare: ">=" } }),
+    );
+    const registry = new FlowJobRegistry(stub("noop.sh", "echo \"Nothing to be done\""));
+
+    const result = JSON.parse(
+      await new RunOrfsStageTool(stubManager, registry).execute(
+        "gcd", "cts", null, null, "base", 8,
+      ),
+    );
+
+    expect(result.status).toBe("succeeded");
+    expect(result.stages).toEqual([]);
+    expect(result.gates).toEqual([]);
+  });
+
+  it("reports metrics the run did write", async () => {
+    const logsDir = path.join(tmpDir, "logs", "nangate45", "gcd", "base");
+    fs.mkdirSync(logsDir, { recursive: true });
+    const registry = new FlowJobRegistry(
+      stub("writes.sh", `echo '{"cts__timing__setup__ws": -0.1}' > ${path.join(logsDir, "4_1_cts.json")}`),
+    );
+
+    const result = JSON.parse(
+      await new RunOrfsStageTool(stubManager, registry).execute(
+        "gcd", "cts", null, null, "base", 8,
+      ),
+    );
+
+    expect(result.stages).toHaveLength(1);
+    expect(result.stages[0].stage).toBe("4_1_cts");
+  });
+
   it("lists every run when no job_id is given", async () => {
     const registry = new FlowJobRegistry(stub("quick.sh", "echo ok"));
     await new RunOrfsStageTool(stubManager, registry).execute("gcd", "cts", null, null, "base", 8);
