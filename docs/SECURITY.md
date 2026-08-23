@@ -216,6 +216,23 @@ under the base directory. A symlink that points outside the base is caught here.
   12 encode attempts. A caller raising `max_size_kb` raises the payload this server will emit;
   the 50 MB on-disk cap above still bounds what is read.
 
+### `read_orfs_metrics` path handling
+
+`read_orfs_metrics` reads only two locations under the ORFS flow root — the stage metrics and logs
+in `logs/<platform>/<design>/<variant>/`, and `designs/<platform>/<design>/rules-base.json`. It
+writes nothing and executes nothing.
+
+- `design` and `variant` are validated as single path segments (`validatePathSegment`), so
+  separators, `..`, null bytes and glob characters are rejected.
+- The resolved logs directory is checked with `validateSafePathContainment` against
+  `<flow>/logs`, which resolves symlinks in existing parents, so a symlinked run directory cannot
+  escape the flow tree.
+- `platform` is not free-form: it is either inferred from the design or checked against the
+  platforms ORFS actually has.
+- Every path in the response is relative to the flow root, so absolute host paths are not disclosed.
+- Stage logs are returned filtered to ORFS's own `[ERROR ...]` / `[WARNING ...]` lines, capped at
+  50 per category per stage, rather than as raw log contents.
+
 **Known image filename mappings:**
 
 Images are classified by filename stem: the `stage` is the prefix before the first `_`, and the

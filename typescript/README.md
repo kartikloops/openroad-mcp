@@ -48,7 +48,8 @@ for per-client configuration for Cursor, Claude Code, GitHub Copilot, and 25+ ot
 | `get_session_history` | Command history with optional limit and search |
 | `get_session_metrics` | Aggregate metrics across all sessions |
 | `list_report_images` | List `.webp` report images from an ORFS run |
-| `read_report_image` | Read and base64-encode a single report image |
+| `read_report_image` | Read a report image and return it as a viewable image block |
+| `read_orfs_metrics` | Read a design's per-stage metrics, rules-base gates and log diagnostics |
 
 Full parameter reference and wire-format shapes: [docs/API.md](https://github.com/The-OpenROAD-Project/openroad-mcp/blob/main/docs/API.md)
 

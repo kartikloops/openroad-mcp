@@ -30,6 +30,8 @@ make golden
 - [Report Image Tools](#report-image-tools)
   - [list_report_images](#list_report_images)
   - [read_report_image](#read_report_image)
+- [ORFS Metrics Tools](#orfs-metrics-tools)
+  - [read_orfs_metrics](#read_orfs_metrics)
 - [Session Lifecycle Notes](#session-lifecycle-notes)
 
 ---
@@ -553,6 +555,120 @@ correctly.
   "error": "ImageNotFound"
 }
 ```
+
+---
+
+## ORFS Metrics Tools
+
+### `read_orfs_metrics`
+
+Read a design's per-stage metrics, evaluate its `rules-base.json` gate thresholds against them, and
+surface the tagged errors and warnings from each stage log — in one call. This replaces the
+`find` + `cat` + `jq` + `grep` sequence over the flow tree that accounted for roughly 39% of all
+shell usage in the capability study.
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `design` | string | **yes** | — |
+| `stage` | string | no | `all` |
+| `platform` | string | no | inferred from `design` |
+| `variant` | string | no | `base` |
+
+`platform` is inferred when the design name is unique across platforms; if it is not, the error
+names the candidates. `design` and `variant` are validated as single path segments.
+
+**Stage resolution.** `stage` is matched, in order, against:
+
+1. an exact file stem — `4_1_cts`
+2. an **ORFS metric namespace** — `placeopt`, `detailedplace`, `globalplace`, `globalroute`,
+   `detailedroute`, `finish`. These matter because `rules-base.json` keys metrics by namespace
+   (`globalroute__timing__setup__ws`) while the file on disk is `5_1_grt.json`.
+3. an everyday **stage group** — `synth`, `floorplan`, `place`, `cts`, `route`, `finish`, which
+   expand to every step in that group (`place` → all five `3_*` files)
+4. a plain substring of the stem
+5. `all` (the default) — every stage
+
+Stages are discovered from the logs directory rather than a hardcoded table, so a renumbered ORFS
+release still resolves. An unmatched stage returns `StageNotFound` listing the stems present.
+
+> **Repeated metrics are arrays.** ORFS appends a block of metrics per sub-run, so a stage file
+> legitimately contains the same key more than once — the real `4_1_cts.json` has 63 key
+> occurrences across 55 distinct keys, recording `cts__utilization__before__dpl` as both `76.7787`
+> and `82.1146`. A plain `JSON.parse` keeps only the last and reports nothing. This tool returns
+> **every** value, in file order, and names those keys in `repeated_metrics` so you can tell an
+> array from a scalar without inspecting each value. Gates on such a metric are judged on the
+> **last** value (what ORFS's own checkers see) and marked `"ambiguous": true`.
+
+**Response shape:**
+
+```json
+{
+  "platform": "nangate45",
+  "design": "gcd",
+  "variant": "base",
+  "stage": "cts",
+  "logs_path": "logs/nangate45/gcd/base",
+  "available_stages": ["1_synth", "2_1_floorplan", "...", "6_report"],
+  "stages": [
+    {
+      "stage": "4_1_cts",
+      "metrics_path": "logs/nangate45/gcd/base/4_1_cts.json",
+      "metrics": {
+        "cts__utilization__before__dpl": [76.7787, 82.1146],
+        "cts__timing__setup__ws": -0.113089,
+        "cts__design__violations": 0
+      },
+      "repeated_metrics": ["cts__utilization__before__dpl"],
+      "log": {
+        "path": "logs/nangate45/gcd/base/4_1_cts.log",
+        "errors": ["[ERROR ORD-2018] Pin is not ITerm or BTerm or modITerm."],
+        "warnings": [],
+        "error_count": 1,
+        "warning_count": 0,
+        "truncated": false
+      },
+      "error": null
+    }
+  ],
+  "gates": [
+    {
+      "metric": "cts__timing__setup__ws",
+      "stage": "4_1_cts",
+      "value": -0.113089,
+      "threshold": -0.0529,
+      "compare": ">=",
+      "level": "error",
+      "status": "fail"
+    }
+  ],
+  "unmatched_gates": [
+    { "metric": "finish__timing__setup__ws", "threshold": -0.0559, "compare": ">=", "level": "error" }
+  ],
+  "gate_summary": {
+    "total": 1, "pass": 0, "fail": 1, "unknown": 0,
+    "failing_errors": 1, "failing_warnings": 0, "unmatched": 1
+  },
+  "rules_path": "designs/nangate45/gcd/rules-base.json",
+  "message": null,
+  "error": null
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `stages[].metrics` | The stage's metrics; a value is an **array** iff its key is in `repeated_metrics` |
+| `stages[].metrics_path` | `null` when the stage produced a log but no metrics file (a crashed stage) |
+| `stages[].error` | `MalformedMetrics: ...` when the JSON is half-written; the stage is still returned |
+| `stages[].log.truncated` | `true` when more diagnostics existed than the 50-per-category listed |
+| `gates[].status` | `pass`, `fail`, or `unknown` when the operator cannot apply to the value |
+| `gates[].level` | From the rule; a rule with no `level` defaults to `error`, as ORFS does |
+| `unmatched_gates` | Rules whose metric was not in the stages read — use `stage: "all"` to cover them |
+
+All paths are returned **relative to the ORFS flow root**, never as absolute host paths.
+
+**Error codes:** `ValidationError` (bad design/variant/platform, or path traversal), `RunNotFound`
+(no such variant; the message lists those present), `StageNotFound` (the message lists the stems
+present).
 
 ---
 
