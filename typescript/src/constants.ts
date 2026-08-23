@@ -20,6 +20,21 @@ export const SIGNIFICANT_LOG_THRESHOLD = 100_000;
 export const CHUNK_JOIN_THRESHOLD = 100;
 
 /**
+ * Flow-run defaults.
+ *
+ * A route on a real design runs for hours, so the default timeout is measured
+ * in hours rather than the seconds a Tcl command gets. MAX_JOBS is deliberately
+ * small: a flow run is far heavier than an interactive session, and nothing
+ * else on the server governs resource use.
+ */
+export const FLOW_RUN_DEFAULTS = {
+  TIMEOUT_SECONDS: 6 * 60 * 60,
+  MAX_JOBS: 2,
+  /** Grace period between SIGTERM and SIGKILL when tearing a run down. */
+  KILL_GRACE_MS: 5000,
+} as const;
+
+/**
  * Report-image budget defaults.
  *
  * MAX_BASE64_KB is the payload ceiling in KB of base64. The previous 15 KB

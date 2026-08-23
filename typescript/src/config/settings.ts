@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { IMAGE_DEFAULTS } from "../constants.js";
+import { FLOW_RUN_DEFAULTS, IMAGE_DEFAULTS } from "../constants.js";
 
 const TRUTHY_VALUES = ["true", "1", "yes"];
 const FALSY_VALUES = ["false", "0", "no"];
@@ -68,6 +68,12 @@ export class Settings {
   readonly IMAGE_MAX_DIMENSION: number;
   /** Longest edge below which the resize ladder refuses to shrink further. */
   readonly IMAGE_MIN_DIMENSION: number;
+  /** Directory flow-run logs are streamed to. Never the session buffer. */
+  readonly RUN_LOG_DIR: string;
+  /** Concurrent flow runs allowed. */
+  readonly MAX_FLOW_JOBS: number;
+  /** Default wall-clock budget for a flow run, in seconds. */
+  readonly FLOW_RUN_TIMEOUT: number;
 
   constructor(overrides: Partial<Settings> = {}) {
     this.COMMAND_TIMEOUT = overrides.COMMAND_TIMEOUT ?? 30.0;
@@ -86,6 +92,9 @@ export class Settings {
     this.IMAGE_MAX_BASE64_KB = overrides.IMAGE_MAX_BASE64_KB ?? IMAGE_DEFAULTS.MAX_BASE64_KB;
     this.IMAGE_MAX_DIMENSION = overrides.IMAGE_MAX_DIMENSION ?? IMAGE_DEFAULTS.MAX_DIMENSION;
     this.IMAGE_MIN_DIMENSION = overrides.IMAGE_MIN_DIMENSION ?? IMAGE_DEFAULTS.MIN_DIMENSION;
+    this.RUN_LOG_DIR = overrides.RUN_LOG_DIR ?? path.join(os.tmpdir(), "openroad-mcp-runs");
+    this.MAX_FLOW_JOBS = overrides.MAX_FLOW_JOBS ?? FLOW_RUN_DEFAULTS.MAX_JOBS;
+    this.FLOW_RUN_TIMEOUT = overrides.FLOW_RUN_TIMEOUT ?? FLOW_RUN_DEFAULTS.TIMEOUT_SECONDS;
   }
 
   get flowPath(): string {
@@ -131,11 +140,14 @@ export class Settings {
       ["IMAGE_MAX_BASE64_KB", "OPENROAD_IMAGE_MAX_BASE64_KB", false],
       ["IMAGE_MAX_DIMENSION", "OPENROAD_IMAGE_MAX_DIMENSION", false],
       ["IMAGE_MIN_DIMENSION", "OPENROAD_IMAGE_MIN_DIMENSION", false],
+      ["MAX_FLOW_JOBS", "OPENROAD_MAX_FLOW_JOBS", false],
+      ["FLOW_RUN_TIMEOUT", "OPENROAD_FLOW_RUN_TIMEOUT", false],
     ];
     const strFields: Array<[keyof Settings, string]> = [
       ["LOG_LEVEL", "LOG_LEVEL"],
       ["LOG_FORMAT", "LOG_FORMAT"],
       ["ORFS_FLOW_PATH", "ORFS_FLOW_PATH"],
+      ["RUN_LOG_DIR", "OPENROAD_RUN_LOG_DIR"],
     ];
 
     for (const [field, envKey, allowZero] of floatFields) {
