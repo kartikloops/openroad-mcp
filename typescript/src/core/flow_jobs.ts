@@ -43,6 +43,8 @@ export interface FlowJob {
   statusPath: string;
   logsDir: string;
   pid: number | null;
+  /** False once the run log could not be written; progress goes blind, the run does not. */
+  logWritable: boolean;
   error: string | null;
 }
 
@@ -129,11 +131,22 @@ export class FlowJobRegistry {
       statusPath,
       logsDir: path.join(cwd, "logs", spec.platform, spec.design, spec.variant),
       pid: null,
+      logWritable: true,
       error: null,
     };
     this.jobs.set(jobId, job);
 
     const stream = fs.createWriteStream(logPath, { flags: "a" });
+    // createWriteStream opens asynchronously, so a log path that is unwritable
+    // -- removed, out of space, permissions -- surfaces here rather than
+    // above. A stream error with no listener is an uncaught exception that
+    // takes the server down, so record it on the job and let the run continue:
+    // losing the log is not a reason to lose the run.
+    stream.on("error", (err: Error) => {
+      job.logWritable = false;
+      if (job.error === null) job.error = `Run log unavailable: ${err.message}`;
+      logger.warn(`Flow job ${jobId}: run log ${logPath} could not be written: ${err.message}`);
+    });
     stream.write(`$ ${this.makeBinary} ${argv.join(" ")}\n`);
 
     let child: ChildProcess;

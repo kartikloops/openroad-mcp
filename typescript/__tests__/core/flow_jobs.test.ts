@@ -203,6 +203,31 @@ describe("FlowJobRegistry lifecycle", () => {
   });
 });
 
+describe("FlowJobRegistry log durability", () => {
+  it("survives the run log becoming unwritable mid-run", async () => {
+    // The log stream opens asynchronously, so a log directory that disappears
+    // after the run starts surfaces as a stream error. With no listener that is
+    // an uncaught exception, which would take the whole server down over a
+    // lost log file. The run must outlive its log.
+    registry = new FlowJobRegistry(stub("quick.sh", "echo cts done"));
+    const job = registry.start(spec(), tmpDir);
+    fs.rmSync(path.join(tmpDir, "runs"), { recursive: true, force: true });
+
+    const done = await settle(registry, job.jobId, 10000);
+
+    expect(done.status).toBe("succeeded");
+    expect(done.exitCode).toBe(0);
+  });
+
+  it("reports the log as writable on a healthy run", async () => {
+    registry = new FlowJobRegistry(stub("quick.sh", "echo ok"));
+    const job = registry.start(spec(), tmpDir);
+    await settle(registry, job.jobId);
+
+    expect(job.logWritable).toBe(true);
+  });
+});
+
 describe("FlowJobRegistry teardown", () => {
   it("kills the whole process group, leaving no orphaned grandchild", async () => {
     // The orphan case scenario 10 found on this host: killing only `make`
