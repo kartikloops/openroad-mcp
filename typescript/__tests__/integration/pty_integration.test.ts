@@ -158,6 +158,11 @@ describe("PTY Integration", () => {
     );
     const code = await handler.waitForExit(10000);
     expect(code).toBe(0);
+    // Process exit and data delivery are separate events: the child can be
+    // reaped while its last chunks are still in flight, which on a fast runner
+    // leaves the collector nearly empty. Wait for the output the same way the
+    // other tests here do, rather than asserting the instant it exits.
+    await waitUntil(() => output().includes("line 100"), 5000);
     expect(output().length).toBeGreaterThan(1000);
     expect(output()).toContain("line 1");
     expect(output()).toContain("line 100");
