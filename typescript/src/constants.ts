@@ -20,6 +20,23 @@ export const SIGNIFICANT_LOG_THRESHOLD = 100_000;
 export const CHUNK_JOIN_THRESHOLD = 100;
 
 /**
+ * Report-image budget defaults.
+ *
+ * MAX_BASE64_KB is the payload ceiling in KB of base64. The previous 15 KB
+ * ceiling forced every render down to the resize floor -- a 1099x1099 image
+ * became 256x256 -- which is unreadable for the congestion and IR-drop
+ * heatmaps these tools exist to show.
+ *
+ * MAX_DIMENSION is the longest edge worth sending: vision models downsample
+ * beyond roughly this, so extra pixels cost payload without adding detail.
+ */
+export const IMAGE_DEFAULTS = {
+  MAX_BASE64_KB: 1024,
+  MAX_DIMENSION: 1568,
+  MIN_DIMENSION: 512,
+} as const;
+
+/**
  * Banner prepended to any command output that lost characters to buffer
  * overflow.
  *
