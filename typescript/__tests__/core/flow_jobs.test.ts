@@ -191,9 +191,12 @@ describe("FlowJobRegistry lifecycle", () => {
     const job = registry.start(spec({ target: "route" }), tmpDir);
     await settle(registry, job.jobId);
 
+    // The whole log must be on disk by the time the job reports finished: a
+    // caller that polls immediately must not get a partial file.
+    const body = fs.readFileSync(job.logPath, "utf8");
+    expect(body).toContain("line 0");
+    expect(body).toContain("line 499");
     const bytes = fs.statSync(job.logPath).size;
-    // Comfortably past what a 128 KB circular buffer would have kept of a
-    // real route log, and every byte is on disk.
     expect(bytes).toBeGreaterThan(3000);
     const view = registry.inspect(job.jobId, 5);
     expect(view.logBytes).toBe(bytes);

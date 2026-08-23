@@ -142,7 +142,9 @@ export class FlowJobRegistry {
     // above. A stream error with no listener is an uncaught exception that
     // takes the server down, so record it on the job and let the run continue:
     // losing the log is not a reason to lose the run.
+    let streamFailed = false;
     stream.on("error", (err: Error) => {
+      streamFailed = true;
       job.logWritable = false;
       if (job.error === null) job.error = `Run log unavailable: ${err.message}`;
       logger.warn(`Flow job ${jobId}: run log ${logPath} could not be written: ${err.message}`);
@@ -178,14 +180,31 @@ export class FlowJobRegistry {
     });
 
     child.on("close", (code, signal) => {
-      stream.end();
       const status: FlowJobStatus =
         job.status === "cancelled" || job.status === "timed_out"
           ? job.status
           : code === 0
             ? "succeeded"
             : "failed";
-      this._finish(job, status, code, signal, null);
+
+      // Finish only once the log has actually flushed. The child closing says
+      // nothing about the pipe into the file being drained, so reporting the
+      // job done here lets a caller poll immediately and read a partial log --
+      // a truncated result that looks complete.
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        this._finish(job, status, code, signal, null);
+      };
+
+      if (streamFailed || stream.destroyed) {
+        done();
+        return;
+      }
+      // An errored stream never emits `finish`, so listen for both.
+      stream.once("error", done);
+      stream.end(done);
     });
 
     const timeoutSeconds = spec.timeoutSeconds ?? settings.FLOW_RUN_TIMEOUT;
