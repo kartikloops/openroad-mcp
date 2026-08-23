@@ -84,6 +84,7 @@ The server reads configuration from environment variables. Key variables:
 | `OPENROAD_COMMAND_TIMEOUT` | `30.0` | Default per-command timeout in seconds |
 | `ORFS_FLOW_PATH` | `~/OpenROAD-flow-scripts/flow` (auto-detected if unset) | Path to ORFS flow directory |
 | `OPENROAD_WHITELIST_ENABLED` | `true` | Enable Tcl command whitelist |
+| `OPENROAD_IMAGE_MAX_BASE64_KB` | `1024` | Report-image payload budget in KB of base64 |
 
 Full list: [docs/SECURITY.md#environment-variable-reference](https://github.com/The-OpenROAD-Project/openroad-mcp/blob/main/docs/SECURITY.md#environment-variable-reference)
 

@@ -160,6 +160,9 @@ All variables are read at startup by [`typescript/src/config/settings.ts`](../ty
 | `OPENROAD_SESSION_QUEUE_SIZE` | integer | `128` | Maximum pending commands in input queue |
 | `OPENROAD_SESSION_IDLE_TIMEOUT` | float (seconds) | `300.0` | Idle threshold; does **not** trigger automatic cleanup (see [Session Lifecycle Notes](API.md#session-lifecycle-notes)) |
 | `OPENROAD_READ_CHUNK_SIZE` | integer (bytes) | `8192` | Max chunk size when splitting large PTY bursts |
+| `OPENROAD_IMAGE_MAX_BASE64_KB` | integer (KB) | `1024` | Report-image payload budget; override per-call with `max_size_kb` |
+| `OPENROAD_IMAGE_MAX_DIMENSION` | integer (pixels) | `1568` | Longest edge an image is capped to before encoding |
+| `OPENROAD_IMAGE_MIN_DIMENSION` | integer (pixels) | `512` | Floor below which the resize ladder will not shrink |
 | `OPENROAD_ALLOWED_COMMANDS` | string (comma-separated) | `openroad` | PTY spawn executable allowlist |
 | `OPENROAD_ENABLE_COMMAND_VALIDATION` | bool | `true` | Enables/disables `PtyHandler.validateCommand` |
 | `OPENROAD_WHITELIST_ENABLED` | bool | `true` | Enables/disables the Tcl command whitelist |
@@ -206,8 +209,12 @@ under the base directory. A symlink that points outside the base is caught here.
   `image_name` that does not end in one of them.
 - Symlinks are skipped during directory listing.
 - On-disk file size is capped at 50 MB before any decoding.
-- The base64-encoded payload is targeted at 15 KB; larger images are downscaled using sharp
-  (lanczos3, WebP quality 85, minimum dimension 256 px).
+- The base64 payload is budgeted at `OPENROAD_IMAGE_MAX_BASE64_KB` (default 1024 KB), which a
+  caller may override per-call with `max_size_kb`. An image over budget is downscaled with sharp
+  (lanczos3, WebP quality 85 → 70 → 55) along a ladder bounded by `OPENROAD_IMAGE_MAX_DIMENSION`
+  (default 1568 px) above and `OPENROAD_IMAGE_MIN_DIMENSION` (default 512 px) below, and at most
+  12 encode attempts. A caller raising `max_size_kb` raises the payload this server will emit;
+  the 50 MB on-disk cap above still bounds what is read.
 
 **Known image filename mappings:**
 

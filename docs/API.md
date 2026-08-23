@@ -119,7 +119,10 @@ full whitelist details.
   "timestamp": "2026-01-01T00:00:00",
   "execution_time": 1.5,
   "command_count": 3,
-  "buffer_size": 2048,
+  "buffer_size": 131072,
+  "truncated": false,
+  "bytes_discarded": 0,
+  "total_bytes": 13,
   "error": null
 }
 ```
@@ -130,7 +133,16 @@ full whitelist details.
 | `session_id` | The session used (auto-created if none was passed) |
 | `execution_time` | Seconds spent on this command |
 | `command_count` | Commands executed in this session so far |
-| `buffer_size` | Current output-buffer occupancy in bytes |
+| `buffer_size` | The session buffer's capacity in characters |
+| `truncated` | `true` when output exceeded the buffer and its head was discarded |
+| `bytes_discarded` | Characters dropped from the **start** of the output |
+| `total_bytes` | Raw characters the command produced, before ANSI cleaning |
+
+> **Truncation warning.** Output larger than the session buffer loses its **beginning**, not its
+> end. When `truncated` is `true` the result is a **partial answer**: the retained text may start
+> mid-line, and any error or warning printed before the cut is not in `output` and is not
+> reflected in `error`. A truncated result also carries a `[TRUNCATED: ...]` banner at the head of
+> `output`. Narrow the command and re-run rather than analysing what came back.
 
 > **Session accumulation warning.** Omitting `session_id` creates a session and **leaves it
 > running**. Capture the returned `session_id` and reuse it, or you will accumulate sessions
@@ -463,9 +475,16 @@ When no images are found: `run_path`, `total_images`, and `images_by_stage` are 
 
 ### `read_report_image`
 
-Read a single `.webp` image and return its base64-encoded data with metadata. Images larger
-than 15 KB (base64) are automatically downscaled using sharp (lanczos3, WebP quality 85) before
-encoding. The 50 MB on-disk limit is enforced before any resizing.
+Read a single report image and return it as a **real MCP image content block** a vision model can
+see, plus a text block carrying the metadata. The base64 payload is *not* repeated in the text
+block.
+
+Images are downscaled only as far as their byte budget actually requires: the longest edge is
+capped at `OPENROAD_IMAGE_MAX_DIMENSION` (default 1568 px, the resolution vision models downsample
+to anyway), then a size/quality ladder steps down only while the encoding still exceeds
+`OPENROAD_IMAGE_MAX_BASE64_KB` (default 1024 KB of base64), never below
+`OPENROAD_IMAGE_MIN_DIMENSION` (default 512 px). Most report images now pass through untouched.
+The 50 MB on-disk limit is enforced before any resizing.
 
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
@@ -473,6 +492,10 @@ encoding. The 50 MB on-disk limit is enforced before any resizing.
 | `design` | string | **yes** | — |
 | `run_slug` | string | **yes** | — |
 | `image_name` | string | **yes** | — |
+| `max_size_kb` | integer | no | `OPENROAD_IMAGE_MAX_BASE64_KB` |
+
+`max_size_kb` overrides the base64 budget for a single call — lower it for a quick thumbnail,
+raise it when a heatmap needs more detail.
 
 `image_name` must end in `.webp` and may not contain path separators or traversal sequences.
 
@@ -482,7 +505,15 @@ encoding. The 50 MB on-disk limit is enforced before any resizing.
 - `idempotentHint: true`
 - `openWorldHint: false`
 
-**Response shape** (`read_image.json`):
+**Response shape.** The tool returns two content blocks:
+
+```
+[ { "type": "image", "data": "<base64>", "mimeType": "image/webp" },
+  { "type": "text",  "text": "<the JSON below, without image_data>" } ]
+```
+
+The underlying JSON payload (`read_image.json`, as returned by the library API which still
+includes `image_data`):
 
 ```json
 {
@@ -507,8 +538,10 @@ encoding. The 50 MB on-disk limit is enforced before any resizing.
 }
 ```
 
-`compression_ratio` is `original_size_bytes / size_bytes`. `compression_applied` is `true`
-when the original exceeded 15 KB (base64).
+`compression_ratio` is `original_size_bytes / size_bytes`. `compression_applied` is `true` only
+when the image actually had to be re-encoded; `format` is sniffed from the bytes rather than
+guessed from the filename, so the doubled `.webp.png` form some ORFS builds emit is reported
+correctly.
 
 **Error response** (`read_image_error.json`):
 
@@ -534,6 +567,9 @@ when the original exceeded 15 KB (base64).
 | Command history per session | 1000 entries | (constant) |
 | Default command timeout | 30 s | `OPENROAD_COMMAND_TIMEOUT` |
 | Input queue depth | 128 commands | `OPENROAD_SESSION_QUEUE_SIZE` |
+| Report-image payload | 1024 KB base64 | `OPENROAD_IMAGE_MAX_BASE64_KB` |
+| Report-image longest edge | 1568 px | `OPENROAD_IMAGE_MAX_DIMENSION` |
+| Report-image resize floor | 512 px | `OPENROAD_IMAGE_MIN_DIMENSION` |
 
 ### Idle Session Accumulation
 
