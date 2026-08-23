@@ -32,6 +32,10 @@ make golden
   - [read_report_image](#read_report_image)
 - [ORFS Metrics Tools](#orfs-metrics-tools)
   - [read_orfs_metrics](#read_orfs_metrics)
+- [Flow Run Tools](#flow-run-tools)
+  - [run_orfs_stage](#run_orfs_stage)
+  - [get_orfs_job](#get_orfs_job)
+  - [cancel_orfs_job](#cancel_orfs_job)
 - [Session Lifecycle Notes](#session-lifecycle-notes)
 
 ---
@@ -672,6 +676,115 @@ present).
 
 ---
 
+## Flow Run Tools
+
+Run an ORFS stage through the server instead of shelling out to `make`. Output streams to a file —
+never through the session's 128 KB circular buffer, which would keep only the tail of a route log.
+
+> **What "inspectable" means here.** A `make`-spawned OpenROAD is a separate process this server
+> does not own, so **its Tcl interpreter cannot be queried mid-run**. `get_orfs_job` gives
+> *structured job progress* — stage, iteration, live violation count, CPU and memory — which is what
+> a caller would otherwise hand-roll from `tail`, `grep`, `ps` and `stat`. It is not live access to
+> the running interpreter.
+
+### `run_orfs_stage`
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `design` | string | **yes** | — |
+| `stage` | string | **yes** | — |
+| `overrides` | object | no | `{}` |
+| `platform` | string | no | inferred from `design` |
+| `variant` | string | no | `base` |
+| `wait_seconds` | integer | no | — (return immediately) |
+| `jobs` | integer | no | — (make default) |
+| `timeout_seconds` | integer | no | `OPENROAD_FLOW_RUN_TIMEOUT` (6 h) |
+| `dry_run` | boolean | no | `false` |
+
+Returns a `job_id` immediately so a multi-hour route does not block the call. Pass `wait_seconds`
+to get the finished result inline when the stage is short. `dry_run: true` runs `make -n`, showing
+which stages the target would chain without running any of them.
+
+`overrides` become **make command-line assignments**, which take precedence over both the
+environment and the Makefile:
+
+```json
+{ "design": "gcd", "stage": "cts", "overrides": { "CTS_CLUSTER_SIZE": "20" } }
+```
+
+Override names are returned verbatim, not converted to snake_case.
+
+**Allowed `stage` values:** `synth`, `floorplan`, `place`, `cts`, `grt`, `route`, `finish`, `all`,
+`metadata`, and `clean_synth` / `clean_floorplan` / `clean_place` / `clean_cts` / `clean_route` /
+`clean_finish` / `clean_metadata` / `clean_all`. Anything else is rejected — see
+[SECURITY.md](SECURITY.md) for why the allowlist exists and which override names are refused.
+
+**Annotations:** `readOnlyHint: false`, `destructiveHint: true` — it writes into the flow tree, and
+the `clean_*` targets delete results.
+
+### `get_orfs_job`
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `job_id` | string | no | — (list every run) |
+| `recent_lines` | integer | no | `50` |
+
+```json
+{
+  "job_id": "a3f2c1d0",
+  "status": "running",
+  "design": "ibex",
+  "stage": "route",
+  "command": "make route DESIGN_CONFIG=./designs/sky130hd/ibex/config.mk FLOW_VARIANT=base",
+  "elapsed_seconds": 1840,
+  "progress": {
+    "current_stage": "5_2_route",
+    "iteration": 1,
+    "percent": 80,
+    "violations": 19604,
+    "iteration_violations": 20,
+    "cpu_seconds": 1802,
+    "memory_mb": 4210.5,
+    "peak_memory_mb": 4300.0
+  },
+  "recent_lines": ["    Completing 80% with 19604 violations."],
+  "log_path": "/tmp/openroad-mcp-runs/a3f2c1d0.log",
+  "log_bytes": 48210934,
+  "log_truncated": true,
+  "stages": [],
+  "gates": [],
+  "error": null
+}
+```
+
+`status` is `running`, `succeeded`, `failed`, `cancelled` or `timed_out`, with `exit_code` always
+present once finished. **On success the result also carries `stages`, `gates` and `gate_summary`**
+in the same shape [read_orfs_metrics](#read_orfs_metrics) returns — including repeated metrics as
+arrays.
+
+`current_stage` comes from the newest `*.tmp.log` in the run's logs directory: ORFS writes each
+stage to `<stem>.tmp.log` and renames it to `<stem>.log` on success, so this tracks the flow without
+depending on stage numbering. `cpu_seconds` and `memory_mb` come from OpenROAD's own `DRT-0267`
+line, not from sampling the `make` pid — the process consuming the machine is a grandchild.
+
+`log_truncated` reports that the log holds more than the lines returned; `log_bytes` is the true
+total.
+
+### `cancel_orfs_job`
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `job_id` | string | **yes** |
+
+Signals the run's **entire process group**, then escalates to `SIGKILL` after a grace period.
+Killing only `make` would strand the `openroad` it spawned. Running jobs are also torn down on
+server shutdown.
+
+**Error codes** across these tools: `ValidationError` (bad design/variant/stage/override),
+`FlowJobLimit` (concurrency cap reached), `FlowJobNotFound`, `FlowPathNotFound`.
+
+---
+
 ## Session Lifecycle Notes
 
 ### Limits
@@ -686,6 +799,9 @@ present).
 | Report-image payload | 1024 KB base64 | `OPENROAD_IMAGE_MAX_BASE64_KB` |
 | Report-image longest edge | 1568 px | `OPENROAD_IMAGE_MAX_DIMENSION` |
 | Report-image resize floor | 512 px | `OPENROAD_IMAGE_MIN_DIMENSION` |
+| Concurrent flow runs | 2 | `OPENROAD_MAX_FLOW_JOBS` |
+| Flow run timeout | 6 h | `OPENROAD_FLOW_RUN_TIMEOUT` |
+| Flow run log directory | `<tmpdir>/openroad-mcp-runs` | `OPENROAD_RUN_LOG_DIR` |
 
 ### Idle Session Accumulation
 

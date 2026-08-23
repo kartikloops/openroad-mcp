@@ -50,6 +50,9 @@ for per-client configuration for Cursor, Claude Code, GitHub Copilot, and 25+ ot
 | `list_report_images` | List `.webp` report images from an ORFS run |
 | `read_report_image` | Read a report image and return it as a viewable image block |
 | `read_orfs_metrics` | Read a design's per-stage metrics, rules-base gates and log diagnostics |
+| `run_orfs_stage` | Run an ORFS flow stage via make as a tracked background job |
+| `get_orfs_job` | Poll a flow run: progress, log tail, and metrics once it finishes |
+| `cancel_orfs_job` | Terminate a flow run and every process it spawned |
 
 Full parameter reference and wire-format shapes: [docs/API.md](https://github.com/The-OpenROAD-Project/openroad-mcp/blob/main/docs/API.md)
 
@@ -86,6 +89,7 @@ The server reads configuration from environment variables. Key variables:
 | `ORFS_FLOW_PATH` | `~/OpenROAD-flow-scripts/flow` (auto-detected if unset) | Path to ORFS flow directory |
 | `OPENROAD_WHITELIST_ENABLED` | `true` | Enable Tcl command whitelist |
 | `OPENROAD_IMAGE_MAX_BASE64_KB` | `1024` | Report-image payload budget in KB of base64 |
+| `OPENROAD_MAX_FLOW_JOBS` | `2` | Concurrent `run_orfs_stage` runs |
 
 Full list: [docs/SECURITY.md#environment-variable-reference](https://github.com/The-OpenROAD-Project/openroad-mcp/blob/main/docs/SECURITY.md#environment-variable-reference)
 
