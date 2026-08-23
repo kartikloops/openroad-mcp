@@ -22,6 +22,8 @@ import {
 } from "./tools/interactive.js";
 import { ListReportImagesTool, ReadReportImageTool } from "./tools/report_images.js";
 import { ReadOrfsMetricsTool } from "./tools/orfs_metrics.js";
+import { RunOrfsStageTool, GetOrfsJobTool, CancelOrfsJobTool } from "./tools/flow_run.js";
+import { flowJobs } from "./core/flow_jobs.js";
 
 const logger = getLogger("server");
 
@@ -50,7 +52,7 @@ function text(value: string): { content: [{ type: "text"; text: string }] } {
 }
 
 /**
- * Build an McpServer with all 11 tools registered. Accepts an optional manager
+ * Build an McpServer with all 14 tools registered. Accepts an optional manager
  * so tests can inject an isolated/mocked one; defaults to the module singleton.
  *
  * Tool names, descriptions, input params, and annotations mirror the Python
@@ -70,6 +72,9 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   const listReportImagesTool = new ListReportImagesTool(manager);
   const readReportImageTool = new ReadReportImageTool(manager);
   const readOrfsMetricsTool = new ReadOrfsMetricsTool(manager);
+  const runOrfsStageTool = new RunOrfsStageTool(manager);
+  const getOrfsJobTool = new GetOrfsJobTool(manager);
+  const cancelOrfsJobTool = new CancelOrfsJobTool(manager);
 
   mcp.registerTool(
     "interactive_openroad_query",
@@ -311,6 +316,91 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
       ),
   );
 
+  mcp.registerTool(
+    "run_orfs_stage",
+    {
+      description:
+        "Run an ORFS flow stage (synth, floorplan, place, cts, grt, route, finish, or a clean_* " +
+        "target) via make, streaming output to a file rather than the session buffer. Returns a " +
+        "job_id immediately so a multi-hour route does not block the call; pass wait_seconds to " +
+        "get the finished result inline when the stage is short. `overrides` become make " +
+        "command-line assignments (e.g. {\"CTS_CLUSTER_SIZE\": \"20\"}), which take precedence " +
+        "over both the environment and the Makefile. Poll with get_orfs_job for live progress, " +
+        "and the parsed stage metrics and gate verdicts once it finishes. Set dry_run to see what " +
+        "make would do without running it.",
+      inputSchema: {
+        design: z.string(),
+        stage: z.string(),
+        overrides: z.record(z.string(), z.string()).optional(),
+        platform: z.string().optional(),
+        variant: z.string().optional(),
+        wait_seconds: z.number().int().positive().optional(),
+        jobs: z.number().int().positive().optional(),
+        timeout_seconds: z.number().int().positive().optional(),
+        dry_run: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      text(
+        await runOrfsStageTool.execute(
+          args.design,
+          args.stage,
+          args.overrides,
+          args.platform,
+          args.variant,
+          args.wait_seconds,
+          args.jobs,
+          args.timeout_seconds,
+          args.dry_run,
+        ),
+      ),
+  );
+
+  mcp.registerTool(
+    "get_orfs_job",
+    {
+      description:
+        "Poll a flow run started by run_orfs_stage: status, elapsed time, the ORFS stage currently " +
+        "executing, detailed-route iteration and live DRC violation count, CPU and memory, and the " +
+        "tail of the run log. Once the run succeeds it also carries the parsed stage metrics and " +
+        "rules-base gate verdicts. Omit job_id to list every run.",
+      inputSchema: {
+        job_id: z.string().optional(),
+        recent_lines: z.number().int().positive().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => text(await getOrfsJobTool.execute(args.job_id, args.recent_lines)),
+  );
+
+  mcp.registerTool(
+    "cancel_orfs_job",
+    {
+      description:
+        "Terminate a running flow job and every process it spawned, so no orphaned openroad " +
+        "process is left behind.",
+      inputSchema: { job_id: z.string() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => text(await cancelOrfsJobTool.execute(args.job_id)),
+  );
+
   return mcp;
 }
 
@@ -389,6 +479,9 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
  */
 export async function runServer(config: CLIConfig): Promise<void> {
   cleanupManager.registerAsyncCleanupHandler(shutdownOpenroad);
+  // A flow run outlives the server otherwise: make and its openroad children
+  // are in their own process group and would keep going after we exit.
+  cleanupManager.registerAsyncCleanupHandler(() => flowJobs.shutdown());
   cleanupManager.setupSignalHandlers();
 
   try {
