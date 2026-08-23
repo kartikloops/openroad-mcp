@@ -243,12 +243,16 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   mcp.registerTool(
     "read_report_image",
     {
-      description: "Read a report image and return base64-encoded data with metadata.",
+      description:
+        "Read a report image (congestion, IR-drop, placement, clock tree) and return it as a " +
+        "viewable image alongside its metadata. Optionally pass max_size_kb to override the " +
+        "configured base64 budget for this call; larger budgets keep more detail in heatmaps.",
       inputSchema: {
         platform: z.string(),
         design: z.string(),
         run_slug: z.string(),
         image_name: z.string(),
+        max_size_kb: z.number().int().positive().optional(),
       },
       annotations: {
         readOnlyHint: true,
@@ -257,15 +261,16 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
         openWorldHint: false,
       },
     },
-    async (args) =>
-      text(
-        await readReportImageTool.execute(
-          args.platform,
-          args.design,
-          args.run_slug,
-          args.image_name,
-        ),
-      ),
+    async (args) => {
+      const { blocks, isError } = await readReportImageTool.executeContent(
+        args.platform,
+        args.design,
+        args.run_slug,
+        args.image_name,
+        args.max_size_kb,
+      );
+      return { content: blocks, ...(isError && { isError: true }) };
+    },
   );
 
   return mcp;

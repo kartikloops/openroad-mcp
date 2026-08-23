@@ -166,6 +166,10 @@
       "image_name": {
         "type": "string",
         "required": true
+      },
+      "max_size_kb": {
+        "type": "integer",
+        "required": false
       }
     },
     "annotations": {
