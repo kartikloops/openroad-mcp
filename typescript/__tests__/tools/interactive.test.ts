@@ -4,6 +4,7 @@ import { QueryShellTool, ExecShellTool, ListSessionsTool, CreateSessionTool, Ter
 import type { OpenROADManager } from "../../src/core/manager.js";
 import { SessionNotFoundError, SessionTerminatedError, SessionError } from "../../src/interactive/models.js";
 import { SessionState } from "../../src/core/models.js";
+import { toSnakeCase } from "../../src/tools/base.js";
 import type { InteractiveExecResult, InteractiveSessionInfo, SessionDetailedMetrics, ManagerMetrics } from "../../src/core/models.js";
 
 const NOW = "2024-01-01T00:00:00.000Z";
@@ -120,6 +121,22 @@ describe("QueryShellTool", () => {
     expect(Object.keys(result)).toContain("truncated");
     expect(Object.keys(result)).toContain("bytes_discarded");
     expect(Object.keys(result)).toContain("total_bytes");
+  });
+
+  it("leaves SCREAMING_SNAKE data keys alone rather than mangling them", async () => {
+    // An ORFS make variable arrives as data, not as a camelCase field name.
+    // Converting it yields _c_t_s__c_l_u_s_t_e_r__s_i_z_e and destroys a name
+    // the caller has to be able to read back.
+    const converted = toSnakeCase({
+      overrides: { CTS_CLUSTER_SIZE: "20", PLACE_DENSITY_LB_ADDON: "0.25" },
+      sessionId: "s1",
+    }) as Record<string, Record<string, string>>;
+
+    expect(Object.keys(converted.overrides!)).toEqual([
+      "CTS_CLUSTER_SIZE",
+      "PLACE_DENSITY_LB_ADDON",
+    ]);
+    expect(Object.keys(converted)).toContain("session_id");
   });
 
   it("handles SessionNotFoundError", async () => {
