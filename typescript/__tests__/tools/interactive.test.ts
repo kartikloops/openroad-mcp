@@ -229,6 +229,19 @@ describe("ExecShellTool", () => {
     const result = JSON.parse(raw);
     expect(result.output).toContain("not found");
   });
+
+  it("tells the caller how to render a timing path when gui::show is blocked", async () => {
+    // "not on the allowlist" alone is a dead end here: the caller wants an
+    // image and there is a form that produces one headlessly.
+    const raw = await tool.execute("gui::show");
+    const result = JSON.parse(raw);
+
+    expect(result.error).toMatch(/CommandBlocked/);
+    expect(result.message).toContain("gui::show {<tcl>} false");
+    expect(result.message).toContain("QT_QPA_PLATFORM=offscreen");
+    expect(result.message).toContain("gui::show_worst_path");
+    expect(mgr.executeCommand).not.toHaveBeenCalled();
+  });
 });
 
 describe("ListSessionsTool", () => {

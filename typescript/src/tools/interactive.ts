@@ -1,5 +1,6 @@
 import { getSettings } from "../config/settings.js";
 import {
+  BLOCK_GUIDANCE,
   isExecCommand,
   isQueryCommand,
 } from "../config/command_whitelist.js";
@@ -85,7 +86,11 @@ function blockedError(
     totalBytes: 0,
     error: `CommandBlocked: '${blockedVerb}'`,
   };
-  const message = `Command blocked: '${blockedVerb}' is not on the OpenROAD allowlist.\nFull command: ${pyRepr(command)}`;
+  const guidance = BLOCK_GUIDANCE[blockedVerb];
+  const message =
+    `Command blocked: '${blockedVerb}' is not on the OpenROAD allowlist.\n` +
+    `Full command: ${pyRepr(command)}` +
+    (guidance === undefined ? "" : `\n${guidance}`);
   return JSON.stringify(toSnakeCase({ ...base, message }));
 }
 

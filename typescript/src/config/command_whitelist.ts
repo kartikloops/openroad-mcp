@@ -327,6 +327,48 @@ function* iterVerbs(command: string): Generator<string> {
 }
 
 /**
+ * Extra guidance for a blocked verb, appended to the generic message. A verb
+ * that is blocked because the *shape* of the call is wrong needs to say what
+ * the right shape is, or the caller has no way to get the job done.
+ */
+export const BLOCK_GUIDANCE: Readonly<Record<string, string>> = {
+  "gui::show":
+    "'gui::show' with no script argument opens the GUI and blocks the Tcl event loop " +
+    "waiting on a human, which wedges the session: the process stays alive but every " +
+    "later command times out. Pass a script and an explicit non-interactive flag " +
+    "instead -- gui::show {<tcl>} false -- which boots the GUI, runs the script and " +
+    "returns. That form works headlessly (set QT_QPA_PLATFORM=offscreen) and is how " +
+    "ORFS renders its report images. To capture a timing path: " +
+    "gui::show {gui::set_display_controls \"Timing Path/*\" visible true; " +
+    "gui::show_worst_path; save_image -width 1920 /tmp/worst_path.png} false",
+};
+
+/**
+ * Reject a `gui::show` that would block the Tcl event loop forever.
+ *
+ * The argument-less form waits on a display and a human, so the session stays
+ * alive -- the process is running and isProcessAlive() reports true -- while
+ * every subsequent command times out. That is indistinguishable from a hang to
+ * the caller, and unrecoverable without terminating the session. `vwait` is in
+ * BLOCKED_COMMANDS for exactly this failure.
+ *
+ * The scripted form does not block: `gui::show <script> false` runs the script
+ * inside a transient GUI event loop and returns. ORFS uses it headlessly to
+ * write final_worst_path.webp (flow/scripts/final_report.tcl), so it has to
+ * keep working -- only the blocking shapes are rejected. `interactive`
+ * defaults to true, so an omitted flag blocks just as a `true` one does.
+ */
+function blocksEventLoop(command: string): string | null {
+  for (const stmt of splitTclStatements(command)) {
+    if (extractVerb(stmt) !== "gui::show") continue;
+    const args = stmt.trim().slice("gui::show".length).trim();
+    if (args.length === 0) return "gui::show";
+    if (!/(?:^|\s)(?:false|0)$/i.test(args)) return "gui::show";
+  }
+  return null;
+}
+
+/**
  * Check whether `command` is safe for the read-only query tool.
  *
  * A verb is allowed only when it matches READONLY_PATTERNS and is not in
@@ -334,6 +376,12 @@ function* iterVerbs(command: string): Generator<string> {
  * both treated as exec-only and are rejected here.
  */
 export function isQueryCommand(command: string): [boolean, string | null] {
+  const blocking = blocksEventLoop(command);
+  if (blocking !== null) {
+    logger.warn(`Blocked command '${blocking}' (would block the Tcl event loop)`);
+    return [false, blocking];
+  }
+
   for (const verb of iterVerbs(command)) {
     if (BLOCKED_COMMANDS.has(verb)) {
       logger.warn(`Blocked command '${verb}' (explicit blocklist)`);
@@ -361,6 +409,12 @@ export function isQueryCommand(command: string): [boolean, string | null] {
  * allowed; they will fail at the Tcl level if invalid.
  */
 export function isExecCommand(command: string): [boolean, string | null] {
+  const blocking = blocksEventLoop(command);
+  if (blocking !== null) {
+    logger.warn(`Blocked command '${blocking}' (would block the Tcl event loop)`);
+    return [false, blocking];
+  }
+
   for (const verb of iterVerbs(command)) {
     if (BLOCKED_COMMANDS.has(verb)) {
       logger.warn(`Blocked command '${verb}' (explicit blocklist)`);

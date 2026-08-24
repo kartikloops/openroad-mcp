@@ -179,6 +179,31 @@ use `interactive_openroad_query` when you want to keep state changes visible and
 The response shape is identical to `interactive_openroad_query`. Long-running flow commands
 routinely exceed 30 s — pass a larger `timeout_ms` for placement, CTS, and routing.
 
+#### Rendering a layout or timing-path image from a session
+
+A session is headless, but Qt renders offscreen, so `save_image` works — the GUI-only commands
+(`gui::show_worst_path`, `gui::set_display_controls`) just need a GUI event loop to exist first.
+`gui::show <script> false` provides one: it boots the GUI, runs the script, and returns. This is
+how ORFS writes its own report images (`flow/scripts/final_report.tcl`).
+
+```tcl
+gui::show {gui::set_display_controls "Timing Path/*" visible true
+           gui::show_worst_path
+           save_image -width 1920 /tmp/worst_path.png} false
+```
+
+`-width` is independent of die size; ORFS instead computes `-resolution` from the block height,
+which is why its images come out ~1000 px regardless of design.
+
+Set `QT_QPA_PLATFORM=offscreen` in the session's `env` when no display is present (ORFS does this
+automatically in `variables.mk`). A bare `gui::show`, or one left interactive, is **rejected** —
+it blocks the Tcl event loop waiting on a human, leaving the session alive but permanently
+unresponsive. The error message carries the working form.
+
+Before rendering anything, check whether the run already has the image: ORFS emits
+`final_worst_path.webp`, `final_congestion.webp` and others into `reports/`, and
+[`read_report_image`](#read_report_image) returns them directly with no session at all.
+
 ---
 
 ### `create_interactive_session`
