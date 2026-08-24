@@ -337,6 +337,31 @@ describe("isExecCommand", () => {
     expect(isExecCommand("quit")).toEqual([false, "quit"]);
   });
 
+  it("blocks a bare gui::show, which wedges the session on the Tcl event loop", () => {
+    expect(isExecCommand("gui::show")).toEqual([false, "gui::show"]);
+  });
+
+  it("blocks a gui::show left interactive, since that also waits on a human", () => {
+    // `interactive` defaults to true, so omitting the flag blocks exactly as
+    // passing true does.
+    expect(isExecCommand("gui::show {save_image /tmp/a.png}")).toEqual([false, "gui::show"]);
+    expect(isExecCommand("gui::show {save_image /tmp/a.png} true")).toEqual([false, "gui::show"]);
+  });
+
+  it("allows the non-interactive gui::show that ORFS uses to render images", () => {
+    // This form runs the script inside a transient GUI event loop and returns,
+    // so it works headlessly under QT_QPA_PLATFORM=offscreen. Blocking it
+    // would remove the only way to capture a timing-path overlay.
+    expect(
+      isExecCommand("gui::show {gui::show_worst_path; save_image /tmp/worst.png} false"),
+    ).toEqual([true, null]);
+    expect(isExecCommand('gui::show "source save_images.tcl" false')).toEqual([true, null]);
+  });
+
+  it("blocks a bare gui::show hidden after another statement", () => {
+    expect(isExecCommand("read_db design.odb\ngui::show")).toEqual([false, "gui::show"]);
+  });
+
   it("allows a multiline all-allowed command", () => {
     expect(isExecCommand("read_db design.odb\nglobal_placement\nwrite_db out.odb")).toEqual([true, null]);
   });

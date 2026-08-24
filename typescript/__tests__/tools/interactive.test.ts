@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Mock } from "vitest";
-import { QueryShellTool, ExecShellTool, ListSessionsTool, CreateSessionTool, TerminateSessionTool, InspectSessionTool, SessionHistoryTool, SessionMetricsTool, InteractiveShellTool } from "../../src/tools/interactive.js";
+import { GrepSessionOutputTool, QueryShellTool, ExecShellTool, ListSessionsTool, CreateSessionTool, TerminateSessionTool, InspectSessionTool, SessionHistoryTool, SessionMetricsTool, InteractiveShellTool } from "../../src/tools/interactive.js";
 import type { OpenROADManager } from "../../src/core/manager.js";
 import { SessionNotFoundError, SessionTerminatedError, SessionError } from "../../src/interactive/models.js";
 import { SessionState } from "../../src/core/models.js";
+import { toSnakeCase } from "../../src/tools/base.js";
 import type { InteractiveExecResult, InteractiveSessionInfo, SessionDetailedMetrics, ManagerMetrics } from "../../src/core/models.js";
 
 const NOW = "2024-01-01T00:00:00.000Z";
@@ -15,7 +16,10 @@ function makeExecResult(overrides: Partial<InteractiveExecResult> = {}): Interac
     timestamp: NOW,
     executionTime: 0.1,
     commandCount: 1,
-    bufferSize: 0,
+    bufferSize: 131072,
+    truncated: false,
+    bytesDiscarded: 0,
+    totalBytes: 11,
     error: null,
     ...overrides,
   };
@@ -114,6 +118,51 @@ describe("QueryShellTool", () => {
     expect(Object.keys(result)).toContain("execution_time");
     expect(Object.keys(result)).toContain("command_count");
     expect(Object.keys(result)).toContain("buffer_size");
+    expect(Object.keys(result)).toContain("truncated");
+    expect(Object.keys(result)).toContain("bytes_discarded");
+    expect(Object.keys(result)).toContain("total_bytes");
+  });
+
+  it("leaves SCREAMING_SNAKE data keys alone rather than mangling them", async () => {
+    // An ORFS make variable arrives as data, not as a camelCase field name.
+    // Converting it yields _c_t_s__c_l_u_s_t_e_r__s_i_z_e and destroys a name
+    // the caller has to be able to read back.
+    const converted = toSnakeCase({
+      overrides: { CTS_CLUSTER_SIZE: "20", PLACE_DENSITY_LB_ADDON: "0.25" },
+      sessionId: "s1",
+    }) as Record<string, Record<string, string>>;
+
+    expect(Object.keys(converted.overrides!)).toEqual([
+      "CTS_CLUSTER_SIZE",
+      "PLACE_DENSITY_LB_ADDON",
+    ]);
+    expect(Object.keys(converted)).toContain("session_id");
+  });
+
+  it("leaves a single-token override name alone", async () => {
+    // CORNER and JOBS carry no underscore and no colon, so the guards written
+    // for CTS_CLUSTER_SIZE did not reach them: CORNER became _c_o_r_n_e_r,
+    // destroying a name run_orfs_stage documents as returned verbatim.
+    const converted = toSnakeCase({
+      overrides: { CORNER: "fast", JOBS: "8", GDS: "x.gds" },
+      sessionId: "s1",
+    }) as Record<string, Record<string, string>>;
+
+    expect(Object.keys(converted.overrides!)).toEqual(["CORNER", "JOBS", "GDS"]);
+    expect(Object.keys(converted)).toContain("session_id");
+  });
+
+  it("leaves an ORFS metric key carrying a mixed-case site name intact", async () => {
+    // Observed in a real run: the key is mostly lowercase, so a
+    // "has no lowercase letters" guard does not protect it, and the site name
+    // after the colon was rewritten to gibberish.
+    const converted = toSnakeCase({
+      "cts__design__rows:FreePDK45_38x28_10R_NP_162NW_34o": 23,
+    }) as Record<string, unknown>;
+
+    expect(Object.keys(converted)).toEqual([
+      "cts__design__rows:FreePDK45_38x28_10R_NP_162NW_34o",
+    ]);
   });
 
   it("handles SessionNotFoundError", async () => {
@@ -179,6 +228,19 @@ describe("ExecShellTool", () => {
     const raw = await tool.execute("read_lef foo.lef", "session-1");
     const result = JSON.parse(raw);
     expect(result.output).toContain("not found");
+  });
+
+  it("tells the caller how to render a timing path when gui::show is blocked", async () => {
+    // "not on the allowlist" alone is a dead end here: the caller wants an
+    // image and there is a form that produces one headlessly.
+    const raw = await tool.execute("gui::show");
+    const result = JSON.parse(raw);
+
+    expect(result.error).toMatch(/CommandBlocked/);
+    expect(result.message).toContain("gui::show {<tcl>} false");
+    expect(result.message).toContain("QT_QPA_PLATFORM=offscreen");
+    expect(result.message).toContain("gui::show_worst_path");
+    expect(mgr.executeCommand).not.toHaveBeenCalled();
   });
 });
 
@@ -449,5 +511,89 @@ describe("Snapshots: wire format stability", () => {
     mgr.listSessions.mockResolvedValue([makeSessionInfo()]);
     const raw = await new ListSessionsTool(mgr as unknown as OpenROADManager).execute();
     expect(raw).toMatchSnapshot();
+  });
+});
+
+describe("GrepSessionOutputTool", () => {
+  function makeManager(over: Partial<Record<string, unknown>> = {}): OpenROADManager {
+    return {
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [
+          { commandNumber: 1, command: "report_checks", lineNumber: 42, line: "wns max -0.485" },
+        ],
+        totalMatches: 1,
+        truncated: false,
+        patternKind: "regex",
+        searchedCommands: 1,
+        searchedLines: 900,
+        retainedChars: 131166,
+        evictedCommands: 0,
+      }),
+      ...over,
+    } as unknown as OpenROADManager;
+  }
+
+  it("returns matches with their command and line number in snake_case", async () => {
+    const raw = await new GrepSessionOutputTool(makeManager()).execute("s1", "wns");
+    const result = JSON.parse(raw);
+
+    expect(result.error).toBeNull();
+    expect(result.total_matches).toBe(1);
+    expect(result.matches[0]).toMatchObject({
+      command_number: 1,
+      command: "report_checks",
+      line_number: 42,
+      line: "wns max -0.485",
+    });
+    expect(result.searched_lines).toBe(900);
+  });
+
+  it("forwards the search options it was given", async () => {
+    const mgr = makeManager();
+    await new GrepSessionOutputTool(mgr).execute("s1", "wns", 10, 2, false, 3);
+
+    expect(mgr.grepSessionOutput).toHaveBeenCalledWith("s1", "wns", {
+      maxMatches: 10,
+      contextLines: 2,
+      ignoreCase: false,
+      commandNumber: 3,
+    });
+  });
+
+  it("says plainly when matches were capped", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [], totalMatches: 500, truncated: true, patternKind: "regex",
+        searchedCommands: 2, searchedLines: 9000, retainedChars: 1000, evictedCommands: 0,
+      }),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s1", "slack"));
+
+    expect(result.truncated).toBe(true);
+    expect(result.message).toMatch(/of 500 matches/);
+  });
+
+  it("explains an empty search rather than looking like a clean miss", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockResolvedValue({
+        matches: [], totalMatches: 0, truncated: false, patternKind: "regex",
+        searchedCommands: 0, searchedLines: 0, retainedChars: 0, evictedCommands: 0,
+      }),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s1", "wns"));
+
+    expect(result.message).toMatch(/No command output is retained/);
+  });
+
+  it("reports a missing session as a structured error", async () => {
+    const mgr = makeManager({
+      grepSessionOutput: vi.fn().mockRejectedValue(new SessionNotFoundError("nope", "s9")),
+    });
+
+    const result = JSON.parse(await new GrepSessionOutputTool(mgr).execute("s9", "wns"));
+
+    expect(result.error).toBe("SessionNotFound");
   });
 });

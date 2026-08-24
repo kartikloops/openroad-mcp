@@ -6,6 +6,7 @@ export class CircularBuffer {
   readonly maxSize: number;
   private readonly _chunks: string[] = [];
   private _totalSize = 0;
+  private _discardedChars = 0;
   private readonly _mutex = new Mutex();
   private _dataAvailable = false;
   private _resolvers: Array<(available: boolean) => void> = [];
@@ -22,6 +23,16 @@ export class CircularBuffer {
     return this._chunks.length;
   }
 
+  /**
+   * Characters dropped on overflow since the last takeDiscarded().
+   *
+   * Overflow silently deletes the oldest output, so a caller that does not
+   * know this number cannot tell a complete result from a mutilated one.
+   */
+  get discardedChars(): number {
+    return this._discardedChars;
+  }
+
   async append(data: string): Promise<void> {
     if (!data) return;
 
@@ -35,6 +46,7 @@ export class CircularBuffer {
       while (this._totalSize > this.maxSize && this._chunks.length > 1) {
         const old = this._chunks.shift()!;
         this._totalSize -= old.length;
+        this._discardedChars += old.length;
       }
 
       // A single chunk larger than maxSize is truncated to its last maxSize
@@ -42,12 +54,29 @@ export class CircularBuffer {
       if (this._totalSize > this.maxSize) {
         const chunk = this._chunks[0]!;
         this._chunks[0] = chunk.slice(chunk.length - this.maxSize);
+        this._discardedChars += chunk.length - this.maxSize;
         this._totalSize = this.maxSize;
       }
 
       this._dataAvailable = true;
       const pending = this._resolvers.splice(0);
       for (const resolve of pending) resolve(true);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Return the discard count and reset it, so the next command starts from
+   * zero. Per-command accounting needs a reset point: a cumulative-only
+   * counter would report a previous command's loss as this one's.
+   */
+  async takeDiscarded(): Promise<number> {
+    const release = await this._mutex.acquire();
+    try {
+      const discarded = this._discardedChars;
+      this._discardedChars = 0;
+      return discarded;
     } finally {
       release();
     }
@@ -137,6 +166,7 @@ export class CircularBuffer {
     chunkCount: number;
     maxSize: number;
     utilizationPercent: number;
+    discardedChars: number;
   }> {
     const release = await this._mutex.acquire();
     try {
@@ -146,6 +176,7 @@ export class CircularBuffer {
         maxSize: this.maxSize,
         utilizationPercent:
           this.maxSize > 0 ? Math.floor((this._totalSize / this.maxSize) * 100) : 0,
+        discardedChars: this._discardedChars,
       };
     } finally {
       release();

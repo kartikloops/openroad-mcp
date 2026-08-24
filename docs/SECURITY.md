@@ -160,6 +160,14 @@ All variables are read at startup by [`typescript/src/config/settings.ts`](../ty
 | `OPENROAD_SESSION_QUEUE_SIZE` | integer | `128` | Maximum pending commands in input queue |
 | `OPENROAD_SESSION_IDLE_TIMEOUT` | float (seconds) | `300.0` | Idle threshold; does **not** trigger automatic cleanup (see [Session Lifecycle Notes](API.md#session-lifecycle-notes)) |
 | `OPENROAD_READ_CHUNK_SIZE` | integer (bytes) | `8192` | Max chunk size when splitting large PTY bursts |
+| `OPENROAD_IMAGE_MAX_BASE64_KB` | integer (KB) | `1024` | Report-image payload budget; override per-call with `max_size_kb` |
+| `OPENROAD_IMAGE_MAX_DIMENSION` | integer (pixels) | `1568` | Longest edge an image is capped to before encoding |
+| `OPENROAD_IMAGE_MIN_DIMENSION` | integer (pixels) | `512` | Floor below which the resize ladder will not shrink |
+| `OPENROAD_OUTPUT_HISTORY_CHARS` | integer (chars) | `262144` (256 KB) | Recent command output retained per session for `grep_session_output`; `0` disables |
+| `OPENROAD_OUTPUT_HISTORY_COMMANDS` | integer | `50` | Commands of output retained per session; `0` disables |
+| `OPENROAD_MAX_FLOW_JOBS` | integer | `2` | Concurrent `run_orfs_stage` runs allowed |
+| `OPENROAD_FLOW_RUN_TIMEOUT` | float (seconds) | `21600` (6 h) | Default wall-clock budget for a flow run |
+| `OPENROAD_RUN_LOG_DIR` | path | `<tmpdir>/openroad-mcp-runs` | Where flow-run logs are streamed |
 | `OPENROAD_ALLOWED_COMMANDS` | string (comma-separated) | `openroad` | PTY spawn executable allowlist |
 | `OPENROAD_ENABLE_COMMAND_VALIDATION` | bool | `true` | Enables/disables `PtyHandler.validateCommand` |
 | `OPENROAD_WHITELIST_ENABLED` | bool | `true` | Enables/disables the Tcl command whitelist |
@@ -206,8 +214,64 @@ under the base directory. A symlink that points outside the base is caught here.
   `image_name` that does not end in one of them.
 - Symlinks are skipped during directory listing.
 - On-disk file size is capped at 50 MB before any decoding.
-- The base64-encoded payload is targeted at 15 KB; larger images are downscaled using sharp
-  (lanczos3, WebP quality 85, minimum dimension 256 px).
+- The base64 payload is budgeted at `OPENROAD_IMAGE_MAX_BASE64_KB` (default 1024 KB), which a
+  caller may override per-call with `max_size_kb`. An image over budget is downscaled with sharp
+  (lanczos3, WebP quality 85 → 70 → 55) along a ladder bounded by `OPENROAD_IMAGE_MAX_DIMENSION`
+  (default 1568 px) above and `OPENROAD_IMAGE_MIN_DIMENSION` (default 512 px) below, and at most
+  12 encode attempts. A caller raising `max_size_kb` raises the payload this server will emit;
+  the 50 MB on-disk cap above still bounds what is read.
+
+### Flow-run execution policy
+
+`run_orfs_stage` spawns `make`, which `OPENROAD_ALLOWED_COMMANDS` does not cover — that setting
+gates the `openroad` binary for PTY sessions only. The flow runner therefore carries its own policy.
+
+**Target allowlist.** Only `synth`, `floorplan`, `place`, `cts`, `grt`, `route`, `finish`, `all`,
+`metadata` and the `clean_*` forms are accepted. This is not cosmetic: without it a `stage` value
+of `-f/tmp/evil.mk` reaches make as a *flag* rather than a goal, redirecting it to an attacker's
+makefile.
+
+**Override validation.** Keys must match `^[A-Z_][A-Z0-9_]*$`. These are refused regardless of
+value, because they control how make executes every recipe rather than what it builds:
+
+`SHELL`, `MAKESHELL`, `.SHELLFLAGS`, `MAKE`, `MAKEFLAGS`, `MAKEFILES`, `PATH`, `LD_PRELOAD`,
+`LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`.
+
+Values are rejected if they contain newlines or null bytes (which would forge additional make
+arguments), or `$(`, `${` or a backtick. The last matters even though no shell is involved: **make
+expands `$(...)` when it reads a variable value**, so `FOO=$(shell id)` is a live execution path.
+
+**No shell.** The child is spawned with an argv array and `shell: false`, so an override value is
+one argument and is never re-parsed.
+
+**Process group.** Runs are spawned detached, into their own process group, so `cancel_orfs_job`,
+the timeout, and server shutdown can signal the whole tree. Killing only `make` would leave the
+`openroad` it spawned running — orphaned OpenROAD processes have been observed on this deployment.
+
+**Resource governance.** `OPENROAD_MAX_FLOW_JOBS` (default 2) caps concurrent runs, and
+`OPENROAD_FLOW_RUN_TIMEOUT` (default 6 h) bounds each one. A flow run is far heavier than an
+interactive session.
+
+**Still privileged.** `run_orfs_stage` writes into the ORFS flow tree and the `clean_*` targets
+delete results; it is annotated `destructiveHint: true`. The policy above constrains *what make is
+told to build*, not what the design's own configuration causes it to run.
+
+### `read_orfs_metrics` path handling
+
+`read_orfs_metrics` reads only two locations under the ORFS flow root — the stage metrics and logs
+in `logs/<platform>/<design>/<variant>/`, and `designs/<platform>/<design>/rules-base.json`. It
+writes nothing and executes nothing.
+
+- `design` and `variant` are validated as single path segments (`validatePathSegment`), so
+  separators, `..`, null bytes and glob characters are rejected.
+- The resolved logs directory is checked with `validateSafePathContainment` against
+  `<flow>/logs`, which resolves symlinks in existing parents, so a symlinked run directory cannot
+  escape the flow tree.
+- `platform` is not free-form: it is either inferred from the design or checked against the
+  platforms ORFS actually has.
+- Every path in the response is relative to the flow root, so absolute host paths are not disclosed.
+- Stage logs are returned filtered to ORFS's own `[ERROR ...]` / `[WARNING ...]` lines, capped at
+  50 per category per stage, rather than as raw log contents.
 
 **Known image filename mappings:**
 

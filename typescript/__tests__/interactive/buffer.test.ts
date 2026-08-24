@@ -63,6 +63,68 @@ describe("CircularBuffer", () => {
     });
   });
 
+  describe("discard accounting", () => {
+    it("reports zero when nothing overflowed", async () => {
+      const buf = new CircularBuffer(100);
+      await buf.append("12345");
+
+      expect(buf.discardedChars).toBe(0);
+      expect(await buf.takeDiscarded()).toBe(0);
+    });
+
+    it("counts characters dropped when oldest chunks are evicted", async () => {
+      const buf = new CircularBuffer(10);
+      await buf.append("12345");
+      await buf.append("67890");
+      await buf.append("ABCDE");
+
+      // "12345" was evicted whole.
+      expect(buf.discardedChars).toBe(5);
+    });
+
+    it("counts characters shaved off a single oversized chunk", async () => {
+      const buf = new CircularBuffer(10);
+      await buf.append("LARGE_CHUNK_EXCEEDS");
+
+      // 19 characters in, 10 retained.
+      expect(buf.discardedChars).toBe(9);
+    });
+
+    it("accumulates across appends and survives a drain", async () => {
+      const buf = new CircularBuffer(10);
+      await buf.append("12345");
+      await buf.append("67890");
+      await buf.append("ABCDE");
+      await buf.drainAll();
+      await buf.append("FGHIJ");
+      await buf.append("KLMNO");
+      await buf.append("PQRST");
+
+      expect(buf.discardedChars).toBe(10);
+    });
+
+    it("takeDiscarded returns the count and resets it", async () => {
+      const buf = new CircularBuffer(10);
+      await buf.append("12345");
+      await buf.append("67890");
+      await buf.append("ABCDE");
+
+      expect(await buf.takeDiscarded()).toBe(5);
+      expect(buf.discardedChars).toBe(0);
+      expect(await buf.takeDiscarded()).toBe(0);
+    });
+
+    it("exposes the count through getStats", async () => {
+      const buf = new CircularBuffer(10);
+      await buf.append("12345");
+      await buf.append("67890");
+      await buf.append("ABCDE");
+
+      const stats = await buf.getStats();
+      expect(stats.discardedChars).toBe(5);
+    });
+  });
+
   describe("edge cases", () => {
     it("ignores empty string appends", async () => {
       const buf = new CircularBuffer(100);

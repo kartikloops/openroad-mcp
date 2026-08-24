@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { FLOW_RUN_DEFAULTS, IMAGE_DEFAULTS, OUTPUT_HISTORY_DEFAULTS } from "../constants.js";
 
 const TRUTHY_VALUES = ["true", "1", "yes"];
 const FALSY_VALUES = ["false", "0", "no"];
@@ -50,6 +51,33 @@ export class Settings {
   readonly ENABLE_COMMAND_VALIDATION: boolean;
   readonly WHITELIST_ENABLED: boolean;
   readonly ORFS_FLOW_PATH: string;
+  /**
+   * Budget for a report image, measured in KB of base64.
+   *
+   * This is the knob that decides whether a congestion or IR-drop heatmap is
+   * actually readable. The old 15 KB ceiling forced every image down to the
+   * 256x256 floor, which is useless for the heatmaps these tools exist to
+   * show.
+   */
+  readonly IMAGE_MAX_BASE64_KB: number;
+  /**
+   * Longest edge, in pixels, an image is resized down to before encoding.
+   * Defaults to the resolution ceiling vision models downsample to anyway --
+   * sending more pixels costs payload without adding detail.
+   */
+  readonly IMAGE_MAX_DIMENSION: number;
+  /** Longest edge below which the resize ladder refuses to shrink further. */
+  readonly IMAGE_MIN_DIMENSION: number;
+  /** Directory flow-run logs are streamed to. Never the session buffer. */
+  readonly RUN_LOG_DIR: string;
+  /** Concurrent flow runs allowed. */
+  readonly MAX_FLOW_JOBS: number;
+  /** Default wall-clock budget for a flow run, in seconds. */
+  readonly FLOW_RUN_TIMEOUT: number;
+  /** Characters of recent command output retained per session for searching. */
+  readonly OUTPUT_HISTORY_CHARS: number;
+  /** Commands of output retained per session for searching. */
+  readonly OUTPUT_HISTORY_COMMANDS: number;
 
   constructor(overrides: Partial<Settings> = {}) {
     this.COMMAND_TIMEOUT = overrides.COMMAND_TIMEOUT ?? 30.0;
@@ -65,6 +93,15 @@ export class Settings {
     this.ENABLE_COMMAND_VALIDATION = overrides.ENABLE_COMMAND_VALIDATION ?? true;
     this.WHITELIST_ENABLED = overrides.WHITELIST_ENABLED ?? true;
     this.ORFS_FLOW_PATH = overrides.ORFS_FLOW_PATH ?? path.join(os.homedir(), "OpenROAD-flow-scripts", "flow");
+    this.IMAGE_MAX_BASE64_KB = overrides.IMAGE_MAX_BASE64_KB ?? IMAGE_DEFAULTS.MAX_BASE64_KB;
+    this.IMAGE_MAX_DIMENSION = overrides.IMAGE_MAX_DIMENSION ?? IMAGE_DEFAULTS.MAX_DIMENSION;
+    this.IMAGE_MIN_DIMENSION = overrides.IMAGE_MIN_DIMENSION ?? IMAGE_DEFAULTS.MIN_DIMENSION;
+    this.RUN_LOG_DIR = overrides.RUN_LOG_DIR ?? path.join(os.tmpdir(), "openroad-mcp-runs");
+    this.MAX_FLOW_JOBS = overrides.MAX_FLOW_JOBS ?? FLOW_RUN_DEFAULTS.MAX_JOBS;
+    this.FLOW_RUN_TIMEOUT = overrides.FLOW_RUN_TIMEOUT ?? FLOW_RUN_DEFAULTS.TIMEOUT_SECONDS;
+    this.OUTPUT_HISTORY_CHARS = overrides.OUTPUT_HISTORY_CHARS ?? OUTPUT_HISTORY_DEFAULTS.MAX_CHARS;
+    this.OUTPUT_HISTORY_COMMANDS =
+      overrides.OUTPUT_HISTORY_COMMANDS ?? OUTPUT_HISTORY_DEFAULTS.MAX_COMMANDS;
   }
 
   get flowPath(): string {
@@ -107,11 +144,19 @@ export class Settings {
       ["MAX_SESSIONS", "OPENROAD_MAX_SESSIONS", false],
       ["SESSION_QUEUE_SIZE", "OPENROAD_SESSION_QUEUE_SIZE", false],
       ["READ_CHUNK_SIZE", "OPENROAD_READ_CHUNK_SIZE", false],
+      ["IMAGE_MAX_BASE64_KB", "OPENROAD_IMAGE_MAX_BASE64_KB", false],
+      ["IMAGE_MAX_DIMENSION", "OPENROAD_IMAGE_MAX_DIMENSION", false],
+      ["IMAGE_MIN_DIMENSION", "OPENROAD_IMAGE_MIN_DIMENSION", false],
+      ["MAX_FLOW_JOBS", "OPENROAD_MAX_FLOW_JOBS", false],
+      ["FLOW_RUN_TIMEOUT", "OPENROAD_FLOW_RUN_TIMEOUT", false],
+      ["OUTPUT_HISTORY_CHARS", "OPENROAD_OUTPUT_HISTORY_CHARS", true],
+      ["OUTPUT_HISTORY_COMMANDS", "OPENROAD_OUTPUT_HISTORY_COMMANDS", true],
     ];
     const strFields: Array<[keyof Settings, string]> = [
       ["LOG_LEVEL", "LOG_LEVEL"],
       ["LOG_FORMAT", "LOG_FORMAT"],
       ["ORFS_FLOW_PATH", "ORFS_FLOW_PATH"],
+      ["RUN_LOG_DIR", "OPENROAD_RUN_LOG_DIR"],
     ];
 
     for (const [field, envKey, allowZero] of floatFields) {

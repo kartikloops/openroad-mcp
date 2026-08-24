@@ -1,4 +1,18 @@
 {
+  "cancel_orfs_job": {
+    "params": {
+      "job_id": {
+        "type": "string",
+        "required": true
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
   "create_interactive_session": {
     "params": {
       "session_id": {
@@ -22,6 +36,24 @@
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  "get_orfs_job": {
+    "params": {
+      "job_id": {
+        "type": "string",
+        "required": false
+      },
+      "recent_lines": {
+        "type": "integer",
+        "required": false
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   },
@@ -49,6 +81,40 @@
   },
   "get_session_metrics": {
     "params": {},
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  "grep_session_output": {
+    "params": {
+      "session_id": {
+        "type": "string",
+        "required": true
+      },
+      "pattern": {
+        "type": "string",
+        "required": true
+      },
+      "max_matches": {
+        "type": "integer",
+        "required": false
+      },
+      "context_lines": {
+        "type": "integer",
+        "required": false
+      },
+      "ignore_case": {
+        "type": "boolean",
+        "required": false
+      },
+      "command_number": {
+        "type": "integer",
+        "required": false
+      }
+    },
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
@@ -149,6 +215,32 @@
       "openWorldHint": false
     }
   },
+  "read_orfs_metrics": {
+    "params": {
+      "design": {
+        "type": "string",
+        "required": true
+      },
+      "stage": {
+        "type": "string",
+        "required": false
+      },
+      "platform": {
+        "type": "string",
+        "required": false
+      },
+      "variant": {
+        "type": "string",
+        "required": false
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
   "read_report_image": {
     "params": {
       "platform": {
@@ -166,12 +258,62 @@
       "image_name": {
         "type": "string",
         "required": true
+      },
+      "max_size_kb": {
+        "type": "integer",
+        "required": false
       }
     },
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  "run_orfs_stage": {
+    "params": {
+      "design": {
+        "type": "string",
+        "required": true
+      },
+      "stage": {
+        "type": "string",
+        "required": true
+      },
+      "overrides": {
+        "type": "object",
+        "required": false
+      },
+      "platform": {
+        "type": "string",
+        "required": false
+      },
+      "variant": {
+        "type": "string",
+        "required": false
+      },
+      "wait_seconds": {
+        "type": "integer",
+        "required": false
+      },
+      "jobs": {
+        "type": "integer",
+        "required": false
+      },
+      "timeout_seconds": {
+        "type": "integer",
+        "required": false
+      },
+      "dry_run": {
+        "type": "boolean",
+        "required": false
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
       "openWorldHint": false
     }
   },

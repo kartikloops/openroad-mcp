@@ -12,6 +12,7 @@ import type {
   InteractiveSessionInfo,
   ManagerMetrics,
   SessionDetailedMetrics,
+  SessionGrepResult,
 } from "./models.js";
 
 /** Time after which a dead session is force-removed even if cleanup fails. */
@@ -182,6 +183,14 @@ export class OpenROADManager {
 
   async filterSessionOutput(sessionId: string, pattern: string, maxLines = 1000): Promise<string[]> {
     return this._getSession(sessionId).filterOutput(pattern, maxLines);
+  }
+
+  async grepSessionOutput(
+    sessionId: string,
+    pattern: string,
+    opts: { maxMatches?: number; contextLines?: number; ignoreCase?: boolean; commandNumber?: number } = {},
+  ): Promise<SessionGrepResult> {
+    return this._getSession(sessionId).grepOutput(pattern, opts);
   }
 
   async setSessionTimeout(sessionId: string, timeoutSeconds: number): Promise<void> {

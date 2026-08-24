@@ -77,6 +77,20 @@ async function writeRealWebp(filePath: string, width: number, height: number): P
   fs.writeFileSync(filePath, buffer);
 }
 
+/**
+ * Writes a noisy .webp, whose encoded size actually tracks its resolution.
+ * A flat-colour image compresses to a few KB at any size, so it cannot
+ * exercise the size-budget ladder.
+ */
+async function writeNoisyWebp(filePath: string, width: number, height: number): Promise<void> {
+  const pixels = Buffer.allocUnsafe(width * height * 3);
+  for (let i = 0; i < pixels.length; i += 1) pixels[i] = (i * 2654435761) % 256;
+  const buffer = await sharp(pixels, { raw: { width, height, channels: 3 } })
+    .webp({ quality: 100 })
+    .toBuffer();
+  fs.writeFileSync(filePath, buffer);
+}
+
 /** Writes a real PNG, for the `.webp.png` files some ORFS builds emit. */
 async function writeRealPng(filePath: string, width: number, height: number): Promise<void> {
   const buffer = await sharp({
@@ -730,7 +744,9 @@ describe("ReadReportImageTool — additional branch coverage", () => {
       return real;
     });
     try {
-      const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "final_all.webp");
+      // An explicit 15 KB budget forces the resize ladder; the default budget
+      // is large enough that a report image of this size passes through whole.
+      const raw = await new ReadReportImageTool(stubManager).execute("nangate45", "gcd", "run-123", "final_all.webp", 15);
       const result = JSON.parse(raw);
       expect(result.error).toBeNull();
       expect(result.metadata.compression_applied).toBe(true);
@@ -768,5 +784,184 @@ describe("ReadReportImageTool — additional branch coverage", () => {
     } finally {
       statSpy.mockRestore();
     }
+  });
+});
+
+describe("ReadReportImageTool — image content blocks and size budget", () => {
+  /** Mirrors the settings mock the other read tests install. */
+  function mockSettings(flowPath: string): void {
+    (getSettings as ReturnType<typeof vi.fn>).mockReturnValue({
+      platforms: ["nangate45"],
+      designs: (p: string) => (p === "nangate45" ? ["gcd"] : []),
+      flowPath,
+      WHITELIST_ENABLED: false,
+    });
+  }
+
+  it("returns a real image content block instead of base64 buried in text", async () => {
+    // The S7 failure: read_report_image handed back a single text block of
+    // 33,412 characters of JSON-wrapped base64. A vision model cannot see
+    // that, and the agent that got it tried to decode it by hand and failed.
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "final_congestion.webp"), 1099, 1099);
+    mockSettings(flowPath);
+
+    const { blocks, isError } = await new ReadReportImageTool(stubManager).executeContent(
+      "nangate45",
+      "gcd",
+      "run-123",
+      "final_congestion.webp",
+    );
+
+    expect(isError).toBe(false);
+    const image = blocks.find((b) => b.type === "image");
+    expect(image).toBeDefined();
+    expect(image).toMatchObject({ type: "image", mimeType: "image/webp" });
+    // The bytes must be real and decodable, not a description of bytes.
+    const decoded = Buffer.from((image as { data: string }).data, "base64");
+    expect((await sharp(decoded).metadata()).width).toBeGreaterThan(0);
+  });
+
+  it("does not repeat the payload in the accompanying text block", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "final_congestion.webp"), 800, 600);
+    mockSettings(flowPath);
+
+    const { blocks } = await new ReadReportImageTool(stubManager).executeContent(
+      "nangate45",
+      "gcd",
+      "run-123",
+      "final_congestion.webp",
+    );
+
+    const textBlock = blocks.find((b) => b.type === "text") as { text: string };
+    const meta = JSON.parse(textBlock.text);
+    expect(meta.image_data).toBeUndefined();
+    expect(meta.metadata.width).toBe(800);
+    expect(meta.metadata.height).toBe(600);
+  });
+
+  it("returns a lone text block and flags isError when the image is missing", async () => {
+    const { flowPath } = createFixture("nangate45", "gcd", "run-123", []);
+    mockSettings(flowPath);
+
+    const { blocks, isError } = await new ReadReportImageTool(stubManager).executeContent(
+      "nangate45",
+      "gcd",
+      "run-123",
+      "nope.webp",
+    );
+
+    expect(isError).toBe(true);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.type).toBe("text");
+    expect(JSON.parse((blocks[0] as { text: string }).text).error).toBe("ImageNotFound");
+  });
+
+  it("keeps a heatmap at full resolution instead of collapsing it to 256x256", async () => {
+    // The old one-shot scale guess drove a 1099x1099 render to the 256x256
+    // floor -- a 35x reduction that makes a congestion map unreadable.
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "final_ir_drop.webp"), 1099, 1099);
+    mockSettings(flowPath);
+
+    const result = JSON.parse(
+      await new ReadReportImageTool(stubManager).execute(
+        "nangate45",
+        "gcd",
+        "run-123",
+        "final_ir_drop.webp",
+      ),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBe(1099);
+    expect(result.metadata.height).toBe(1099);
+  });
+
+  it("sheds quality before resolution when the budget is tight", async () => {
+    // The ladder used to exhaust every size at q85 before dropping to q70, so
+    // a 1099px render that missed the budget at q85 came back as an 824px
+    // thumbnail even though the full-size q70 encoding fit inside it. For a
+    // congestion map that trade is backwards.
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeNoisyWebp(path.join(runPath, "final_congestion.webp"), 1099, 1099);
+    mockSettings(flowPath);
+
+    const result = JSON.parse(
+      await new ReadReportImageTool(stubManager).execute(
+        "nangate45",
+        "gcd",
+        "run-123",
+        "final_congestion.webp",
+        800,
+      ),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBe(1099);
+    expect(result.metadata.height).toBe(1099);
+  });
+
+  it("caps the long edge at the configured maximum and preserves aspect ratio", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "final_all.webp"), 4000, 2000);
+    mockSettings(flowPath);
+
+    const result = JSON.parse(
+      await new ReadReportImageTool(stubManager).execute(
+        "nangate45",
+        "gcd",
+        "run-123",
+        "final_all.webp",
+        // A tight budget forces the ladder; aspect ratio must still hold.
+        32,
+      ),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBeGreaterThan(result.metadata.height);
+    expect(result.metadata.width / result.metadata.height).toBeCloseTo(2, 1);
+    expect(result.metadata.original_width).toBe(4000);
+  });
+
+  it("honours a per-call size budget", async () => {
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeNoisyWebp(path.join(runPath, "final_all.webp"), 1200, 1200);
+    mockSettings(flowPath);
+    const tool = new ReadReportImageTool(stubManager);
+
+    const generous = JSON.parse(
+      await tool.execute("nangate45", "gcd", "run-123", "final_all.webp", 2048),
+    );
+    const stingy = JSON.parse(
+      await tool.execute("nangate45", "gcd", "run-123", "final_all.webp", 16),
+    );
+
+    expect(stingy.metadata.size_bytes).toBeLessThan(generous.metadata.size_bytes);
+    expect(stingy.metadata.width).toBeLessThan(generous.metadata.width);
+    // A tight budget still must not go below the configured floor.
+    expect(stingy.metadata.width).toBeGreaterThanOrEqual(512);
+  });
+
+  it("falls back to documented defaults when settings omit the image knobs", async () => {
+    // Every settings stub in this file predates these fields; a missing knob
+    // must not reach sharp as NaN and silently degrade to raw bytes.
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeRealWebp(path.join(runPath, "final_all.webp"), 3000, 3000);
+    mockSettings(flowPath);
+
+    const result = JSON.parse(
+      await new ReadReportImageTool(stubManager).execute(
+        "nangate45",
+        "gcd",
+        "run-123",
+        "final_all.webp",
+      ),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBeGreaterThanOrEqual(512);
+    expect(result.metadata.width).toBeLessThanOrEqual(1568);
   });
 });

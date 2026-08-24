@@ -14,13 +14,70 @@ import {
   validateSafePathContainment,
 } from "../utils/path_security.js";
 import { getSettings } from "../config/settings.js";
+import { IMAGE_DEFAULTS } from "../constants.js";
 import { getLogger } from "../utils/logging.js";
 import { BaseTool } from "./base.js";
 
 const logger = getLogger("tools.report_images");
 
-const MAX_BASE64_SIZE_KB = 15;
 const MAX_IMAGE_SIZE_MB = 50;
+
+/**
+ * Longest-edge ladder walked when an image does not fit its byte budget.
+ * Each rung is tried at descending WebP quality before the next rung down, so
+ * detail is traded away gradually instead of collapsing straight to the floor.
+ */
+const RESIZE_LADDER_FACTOR = 0.75;
+const QUALITY_LADDER = [85, 70, 55] as const;
+/** Safety valve on the search, not a tuning knob. It has to clear the whole
+ * default ladder or the cap silently truncates it: 1568px down to the 512px
+ * floor at 0.75 is five size rungs, times three quality rungs, is fifteen. At
+ * the old 12 a full-size image never reached its smallest rung -- the one rung
+ * that exists for images nothing else fits. */
+const MAX_ENCODE_ATTEMPTS = 24;
+
+/** An MCP content block: a real image block, or accompanying text. */
+export type ContentBlock =
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "text"; text: string };
+
+export interface ImageContentResult {
+  blocks: ContentBlock[];
+  isError: boolean;
+}
+
+/**
+ * Resolve the image budget, tolerating a settings object that predates these
+ * fields or supplies a nonsense value. A missing knob must fall back to the
+ * documented default, never propagate NaN into sharp.
+ */
+function resolveImageBudget(overrideKb?: number | null): {
+  maxSizeKb: number;
+  maxDimension: number;
+  minDimension: number;
+} {
+  const settings = getSettings() as Partial<{
+    IMAGE_MAX_BASE64_KB: number;
+    IMAGE_MAX_DIMENSION: number;
+    IMAGE_MIN_DIMENSION: number;
+  }>;
+  const positive = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+
+  return {
+    maxSizeKb: positive(
+      overrideKb,
+      positive(settings.IMAGE_MAX_BASE64_KB, IMAGE_DEFAULTS.MAX_BASE64_KB),
+    ),
+    maxDimension: positive(settings.IMAGE_MAX_DIMENSION, IMAGE_DEFAULTS.MAX_DIMENSION),
+    minDimension: positive(settings.IMAGE_MIN_DIMENSION, IMAGE_DEFAULTS.MIN_DIMENSION),
+  };
+}
+
+/** MIME type for a base64 payload, so callers can emit a real image block. */
+function mimeTypeForFormat(format: string): string {
+  return format === "png" ? "image/png" : "image/webp";
+}
 
 const IMAGE_TYPE_MAPPING: Record<string, string> = {
   cts_clk: "clock_visualization",
@@ -119,11 +176,6 @@ export function isReportImage(filename: string): boolean {
  * reporting a blanket "webp" would misdescribe the payload to any consumer that
  * trusts this field instead of sniffing the header.
  */
-function imageFormat(filename: string, compressionApplied: boolean): string {
-  if (compressionApplied) return "webp";
-  return filename.toLowerCase().endsWith(".webp") ? "webp" : "png";
-}
-
 /** Strip the report-image extension, including the doubled `.webp.png` form. */
 function stripImageExtension(filename: string): string {
   const lower = filename.toLowerCase();
@@ -156,87 +208,156 @@ interface CompressResult {
   originalHeight: number | null;
   width: number | null;
   height: number | null;
+  /** Actual encoded format ("webp" / "png"), sniffed rather than guessed. */
+  format: string;
 }
 
 /**
- * Compress an image to fit within `maxSizeKb` of base64 output using sharp
- * (lanczos3 resize, WebP quality 85). Falls back to raw bytes with null
- * dimensions when sharp fails.
+ * Load an image, resizing only as far as its byte budget actually requires.
+ *
+ * The previous implementation guessed a scale factor from the raw file size in
+ * one shot (`sqrt(targetBytes / originalSize)`), which ignores that the output
+ * is re-encoded as WebP. It over-shrank badly -- a 1099x1099 render landed on
+ * the 256x256 floor, a 35x reduction, which is unreadable for the congestion
+ * and IR-drop heatmaps these tools exist to show.
+ *
+ * Instead: cap the long edge at `maxDimension`, encode, and step down a
+ * quality/size ladder only while the result still exceeds budget. Most images
+ * now pass through at full resolution.
  */
 async function loadAndCompressImage(
   imagePath: string,
-  maxSizeKb: number = MAX_BASE64_SIZE_KB,
+  overrideMaxSizeKb?: number | null,
 ): Promise<CompressResult> {
+  const { maxSizeKb, maxDimension, minDimension } = resolveImageBudget(overrideMaxSizeKb);
   const originalSize = fs.statSync(imagePath).size;
-  const estimatedBase64 = Math.floor((originalSize * 4) / 3);
+  // base64 inflates by 4/3, so the byte budget is 3/4 of the stated KB budget.
+  const targetBytes = Math.floor((maxSizeKb * 1024 * 3) / 4);
 
-  if (estimatedBase64 / 1024 <= maxSizeKb) {
-    try {
-      const rawBytes = fs.readFileSync(imagePath);
-      const meta = await sharp(imagePath).metadata();
-      return {
-        imageBytes: rawBytes,
-        compressionApplied: false,
-        originalSize,
-        compressedSize: originalSize,
-        originalWidth: meta.width ?? null,
-        originalHeight: meta.height ?? null,
-        width: meta.width ?? null,
-        height: meta.height ?? null,
-      };
-    } catch (e) {
-      logger.warn({ err: e, imagePath }, "sharp.metadata() failed on small image; returning raw bytes with null dims");
-      return {
-        imageBytes: fs.readFileSync(imagePath),
-        compressionApplied: false,
-        originalSize,
-        compressedSize: originalSize,
-        originalWidth: null,
-        originalHeight: null,
-        width: null,
-        height: null,
-      };
-    }
+  const rawFallback = (
+    format: string,
+    width: number | null = null,
+    height: number | null = null,
+  ): CompressResult => ({
+    imageBytes: fs.readFileSync(imagePath),
+    compressionApplied: false,
+    originalSize,
+    compressedSize: originalSize,
+    originalWidth: width,
+    originalHeight: height,
+    width,
+    height,
+    format,
+  });
+
+  let meta;
+  try {
+    meta = await sharp(imagePath).metadata();
+  } catch (e) {
+    logger.warn(
+      { err: e, imagePath },
+      "sharp.metadata() failed; returning raw bytes with null dims",
+    );
+    return rawFallback(formatFromExtension(imagePath));
+  }
+
+  const origW = meta.width ?? null;
+  const origH = meta.height ?? null;
+  const sniffedFormat = meta.format === "png" ? "png" : "webp";
+
+  // Already within budget and within the resolution ceiling: hand back the
+  // original bytes untouched. This is the common case now that the budget is
+  // measured in MB rather than 15 KB.
+  const longEdge = Math.max(origW ?? 0, origH ?? 0);
+  if (originalSize <= targetBytes && (longEdge === 0 || longEdge <= maxDimension)) {
+    return rawFallback(sniffedFormat, origW, origH);
+  }
+
+  if (origW === null || origH === null) {
+    logger.warn({ imagePath }, "Image dimensions unavailable; returning raw bytes");
+    return rawFallback(sniffedFormat);
   }
 
   try {
-    const targetBytes = Math.floor((maxSizeKb * 1024 * 3) / 4);
-    const scale = Math.sqrt(targetBytes / originalSize);
-    const meta = await sharp(imagePath).metadata();
-    if (!meta.width || !meta.height) {
-      throw new Error("Image dimensions unavailable");
+    let dim = Math.min(longEdge, maxDimension);
+    let best: { buf: Buffer; dim: number; quality: number } | null = null;
+    let attempts = 0;
+
+    // Quality is shed before resolution. A congestion or routing image carries
+    // its signal in fine wire and via detail, which downsampling destroys
+    // outright, while WebP quality loss degrades it gracefully -- so every
+    // quality rung is tried at the current size before the image is made
+    // smaller. The previous order inverted this and returned a 512px q85
+    // thumbnail where a full-resolution q70 encoding was within budget.
+    while (attempts < MAX_ENCODE_ATTEMPTS) {
+      for (const quality of QUALITY_LADDER) {
+        if (attempts >= MAX_ENCODE_ATTEMPTS) break;
+        attempts += 1;
+        const buf = await sharp(imagePath)
+          .resize(dim, dim, {
+            fit: "inside",
+            withoutEnlargement: true,
+            kernel: "lanczos3",
+          })
+          .webp({ quality })
+          .toBuffer();
+
+        if (buf.length <= targetBytes) return await describeEncoded(buf, dim, quality);
+        // Remember the smallest encoding produced, so a budget that nothing
+        // satisfies still returns the closest image rather than raw bytes.
+        if (best === null || buf.length < best.buf.length) best = { buf, dim, quality };
+      }
+      if (dim <= minDimension) break;
+      dim = Math.max(minDimension, Math.floor(dim * RESIZE_LADDER_FACTOR));
     }
-    const origW = meta.width;
-    const origH = meta.height;
-    const newW = Math.max(Math.round(origW * scale), 256);
-    const newH = Math.max(Math.round(origH * scale), 256);
-    const compressed = await sharp(imagePath)
-      .resize(newW, newH, { kernel: "lanczos3" })
-      .webp({ quality: 85 })
-      .toBuffer();
-    return {
-      imageBytes: compressed,
-      compressionApplied: true,
-      originalSize,
-      compressedSize: compressed.length,
-      originalWidth: meta.width ?? null,
-      originalHeight: meta.height ?? null,
-      width: newW,
-      height: newH,
-    };
+
+    if (best === null) return rawFallback(sniffedFormat, origW, origH);
+    logger.warn(
+      { imagePath, maxSizeKb, resultBytes: best.buf.length },
+      "Image could not be squeezed within its base64 budget; returning the smallest encoding produced",
+    );
+    // Report the quality that actually produced this buffer; the fallback used
+    // to hardcode the last ladder rung and mislabel a q85 encoding as q55.
+    return await describeEncoded(best.buf, best.dim, best.quality);
   } catch (e) {
     logger.warn({ err: e, imagePath }, "Image compression failed; returning raw bytes with null dims");
+    return rawFallback(sniffedFormat, origW, origH);
+  }
+
+  async function describeEncoded(
+    buf: Buffer,
+    requestedDim: number,
+    quality: number,
+  ): Promise<CompressResult> {
+    // Read the dimensions back off the encoded buffer: `fit: "inside"`
+    // preserves aspect ratio, so the short edge is not `requestedDim`.
+    let outW: number | null = requestedDim;
+    let outH: number | null = requestedDim;
+    try {
+      const outMeta = await sharp(buf).metadata();
+      outW = outMeta.width ?? requestedDim;
+      outH = outMeta.height ?? requestedDim;
+    } catch {
+      /* fall back to the requested box */
+    }
+    logger.debug({ imagePath, outW, outH, quality, bytes: buf.length }, "Encoded report image");
     return {
-      imageBytes: fs.readFileSync(imagePath),
-      compressionApplied: false,
+      imageBytes: buf,
+      compressionApplied: true,
       originalSize,
-      compressedSize: originalSize,
-      originalWidth: null,
-      originalHeight: null,
-      width: null,
-      height: null,
+      compressedSize: buf.length,
+      originalWidth: origW,
+      originalHeight: origH,
+      width: outW,
+      height: outH,
+      format: "webp",
     };
   }
+}
+
+/** Last-resort format guess when the bytes cannot be sniffed. */
+function formatFromExtension(filename: string): string {
+  return filename.toLowerCase().endsWith(".png") ? "png" : "webp";
 }
 
 /** Lists .webp report images for a specific platform/design/run. */
@@ -371,11 +492,19 @@ export class ReadReportImageTool extends BaseTool {
     super(manager);
   }
 
+  /**
+   * Read an image and return the legacy JSON payload, base64 included.
+   *
+   * `maxSizeKb` overrides the configured IMAGE_MAX_BASE64_KB budget for this
+   * call, for the occasional case where a caller wants a deliberately small
+   * thumbnail or a deliberately large one.
+   */
   async execute(
     platform: string,
     design: string,
     runSlug: string,
     imageName: string,
+    maxSizeKb?: number | null,
   ): Promise<string> {
     let reportsBase: string;
     let runPath: string;
@@ -477,7 +606,7 @@ export class ReadReportImageTool extends BaseTool {
     }
 
     try {
-      const r = await loadAndCompressImage(imagePath);
+      const r = await loadAndCompressImage(imagePath, maxSizeKb);
       const imageData = r.imageBytes.toString("base64");
       const [stage, type] = classifyImageType(imageName);
       const compressionRatio =
@@ -487,7 +616,7 @@ export class ReadReportImageTool extends BaseTool {
 
       const metadata = ImageMetadata.parse({
         filename: imageName,
-        format: imageFormat(imageName, r.compressionApplied),
+        format: r.format,
         sizeBytes: r.compressedSize,
         width: r.width,
         height: r.height,
@@ -523,5 +652,54 @@ export class ReadReportImageTool extends BaseTool {
         }) as unknown as Record<string, unknown>,
       );
     }
+  }
+
+  /**
+   * Read an image and return it as MCP content blocks.
+   *
+   * The base64 payload goes in a real `image` block so a vision model can see
+   * it. Returning it inside a text block -- as this tool used to -- delivered
+   * 33 KB of unreadable base64 to a model that then tried, and failed, to
+   * decode it by hand. The accompanying text block carries the metadata only,
+   * with `image_data` stripped so the payload is not sent twice.
+   */
+  async executeContent(
+    platform: string,
+    design: string,
+    runSlug: string,
+    imageName: string,
+    maxSizeKb?: number | null,
+  ): Promise<ImageContentResult> {
+    const json = await this.execute(platform, design, runSlug, imageName, maxSizeKb);
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(json) as Record<string, unknown>;
+    } catch {
+      return { blocks: [{ type: "text", text: json }], isError: true };
+    }
+
+    const imageData = parsed["image_data"];
+    const metadata = parsed["metadata"] as { format?: string } | null | undefined;
+    if (typeof imageData !== "string" || imageData.length === 0) {
+      // An error result: no image to show, so the JSON is the whole answer.
+      return { blocks: [{ type: "text", text: json }], isError: parsed["error"] != null };
+    }
+
+    const { image_data: _omitted, ...withoutData } = parsed as Record<string, unknown> & {
+      image_data?: unknown;
+    };
+
+    return {
+      blocks: [
+        {
+          type: "image",
+          data: imageData,
+          mimeType: mimeTypeForFormat(metadata?.format ?? "webp"),
+        },
+        { type: "text", text: JSON.stringify(withoutData) },
+      ],
+      isError: false,
+    };
   }
 }

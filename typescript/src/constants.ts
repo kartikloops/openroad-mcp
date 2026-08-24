@@ -19,6 +19,74 @@ export const SIGNIFICANT_LOG_THRESHOLD = 100_000;
 
 export const CHUNK_JOIN_THRESHOLD = 100;
 
+/**
+ * Per-session retention of recent command output, so it can be searched after
+ * the fact.
+ *
+ * The circular buffer cannot serve this: runCommand drains it to empty, so a
+ * search over the live buffer finds nothing. Retention is capped by total
+ * characters and by number of commands, oldest evicted first.
+ */
+export const OUTPUT_HISTORY_DEFAULTS = {
+  MAX_CHARS: 256 * 1024,
+  MAX_COMMANDS: 50,
+} as const;
+
+/**
+ * Flow-run defaults.
+ *
+ * A route on a real design runs for hours, so the default timeout is measured
+ * in hours rather than the seconds a Tcl command gets. MAX_JOBS is deliberately
+ * small: a flow run is far heavier than an interactive session, and nothing
+ * else on the server governs resource use.
+ */
+export const FLOW_RUN_DEFAULTS = {
+  TIMEOUT_SECONDS: 6 * 60 * 60,
+  MAX_JOBS: 2,
+  /** Grace period between SIGTERM and SIGKILL when tearing a run down. */
+  KILL_GRACE_MS: 5000,
+} as const;
+
+/**
+ * Report-image budget defaults.
+ *
+ * MAX_BASE64_KB is the payload ceiling in KB of base64. The previous 15 KB
+ * ceiling forced every render down to the resize floor -- a 1099x1099 image
+ * became 256x256 -- which is unreadable for the congestion and IR-drop
+ * heatmaps these tools exist to show.
+ *
+ * MAX_DIMENSION is the longest edge worth sending: vision models downsample
+ * beyond roughly this, so extra pixels cost payload without adding detail.
+ */
+export const IMAGE_DEFAULTS = {
+  MAX_BASE64_KB: 1024,
+  MAX_DIMENSION: 1568,
+  MIN_DIMENSION: 512,
+} as const;
+
+/**
+ * Banner prepended to any command output that lost characters to buffer
+ * overflow.
+ *
+ * The structured `truncated` / `bytes_discarded` fields carry the same fact,
+ * but a consumer reads `output` first: a result that silently begins mid-line
+ * reads as a complete answer, and has been acted on as one. Putting the notice
+ * in the text itself makes that mistake impossible.
+ */
+export function truncationNotice(
+  discarded: number,
+  total: number,
+  retained: number,
+): string {
+  const n = (v: number): string => v.toLocaleString("en-US");
+  return (
+    `[TRUNCATED: ${n(discarded)} of ${n(total)} characters were discarded from the START of this output.\n` +
+    ` What follows is the LAST ${n(retained)} characters only, and may begin mid-line. Any error or\n` +
+    ` warning printed before this point is NOT visible here. Narrow the query and re-run.]\n` +
+    `---\n`
+  );
+}
+
 export const LARGE_IO_THRESHOLD = 10_000;
 export const SLOW_OPERATION_THRESHOLD = 1.0;
 

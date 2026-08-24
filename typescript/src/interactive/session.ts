@@ -6,6 +6,11 @@ import { getSettings } from "../config/settings.js";
 import type { Settings } from "../config/settings.js";
 import { SessionState } from "../core/models.js";
 import type {
+  SessionGrepMatch,
+  SessionGrepResult,
+  SessionOutputRecord,
+} from "../core/models.js";
+import type {
   CommandHistoryEntry,
   InteractiveExecResult,
   InteractiveSessionInfo,
@@ -15,7 +20,9 @@ import {
   BYTES_TO_MB,
   MAX_COMMAND_COMPLETION_WINDOW,
   MAX_COMMAND_HISTORY,
+  OUTPUT_HISTORY_DEFAULTS,
   PTY_LINE_TERMINATOR,
+  truncationNotice,
   UTILIZATION_PERCENTAGE_BASE,
 } from "../constants.js";
 import { CircularBuffer } from "./buffer.js";
@@ -107,6 +114,19 @@ export class InteractiveSession {
   // Serialises terminate()/cleanup() so concurrent callers cannot double-kill
   // the process or deliver a stale exit code to waiters.
   private readonly _lifecycleLock = new Mutex();
+
+  /**
+   * Recent command output, kept so it can be searched after the fact.
+   *
+   * runCommand drains the circular buffer to empty, so anything searching the
+   * live buffer finds nothing once a command has returned. Retaining the
+   * cleaned output here is what makes grep over a session's results possible
+   * without re-running the command or re-sending a large result.
+   */
+  private readonly _outputHistory: SessionOutputRecord[] = [];
+  private _outputHistoryChars = 0;
+  /** Records dropped to stay inside the retention budget. */
+  private _outputHistoryEvicted = 0;
 
   constructor(sessionId: string, bufferSize?: number, private readonly _settings: Settings = getSettings()) {
     this.sessionId = sessionId;
@@ -266,7 +286,7 @@ export class InteractiveSession {
    * results that were never computed.
    */
   async verifyResponsive(timeoutMs = 15000): Promise<void> {
-    const result = await this.runCommand(PROBE_COMMAND, timeoutMs);
+    const result = await this.runCommand(PROBE_COMMAND, timeoutMs, false);
     if (!result.output.includes(PROBE_TOKEN)) {
       throw new SessionError(
         `Session ${this.sessionId} started but is not executing commands: the OpenROAD ` +
@@ -291,8 +311,16 @@ export class InteractiveSession {
    * PTY's echo as a successful result for anything slower than a few
    * milliseconds. This waits for an explicit sentinel and reports a real error
    * when the command does not finish inside timeoutMs.
+   *
+   * `retain` exists for the startup probe, which is plumbing rather than user
+   * activity: its output must not be searchable and must not consume any of
+   * the retention budget.
    */
-  async runCommand(command: string, timeoutMs = 30000): Promise<InteractiveExecResult> {
+  async runCommand(
+    command: string,
+    timeoutMs = 30000,
+    retain = true,
+  ): Promise<InteractiveExecResult> {
     const startTime = Date.now();
 
     if (!this.checkAlive()) {
@@ -304,16 +332,36 @@ export class InteractiveSession {
     ).toString(36)}`;
     const marker = SENTINEL_MARKER(nonce);
 
+    // Zero the buffer's discard counter so the result accounts for this
+    // command's loss only, not a previous command's.
+    await this.outputBuffer.takeDiscarded();
+
     await this.sendCommand(command);
     this._enqueueRaw(SENTINEL_COMMAND(nonce));
 
-    const { text, timedOut, died } = await this._readUntilMarker(marker, startTime, timeoutMs);
+    const { text, timedOut, died, discarded } = await this._readUntilMarker(
+      marker,
+      startTime,
+      timeoutMs,
+    );
+
+    // Output is lost in two places -- evicted from the buffer before we drained
+    // it, and sliced off the read accumulator once it passed the cap -- so both
+    // have to be summed for the total to be honest.
+    const bytesDiscarded = discarded + (await this.outputBuffer.takeDiscarded());
+    const totalBytes = text.length + bytesDiscarded;
 
     const executionTime = (Date.now() - startTime) / 1000;
-    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(text));
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(text)),
+      bytesDiscarded,
+      totalBytes,
+      text.length,
+    );
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
+    if (retain) this._retainOutput(command, output);
 
     // An incomplete result outranks anything matched inside it: a command that
     // printed "Error:" and then kept running must not look like it finished.
@@ -323,6 +371,9 @@ export class InteractiveSession {
     } else if (died) {
       error = "SessionTerminated: process exited before the command completed";
     } else {
+      // Only the retained tail is inspected, so an error printed in the
+      // discarded head cannot be reported here. The truncation notice
+      // prepended to `output` is what warns the caller of that blind spot.
       error = this._detectErrors(output) ?? null;
     }
 
@@ -332,9 +383,26 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error,
     };
+  }
+
+  /**
+   * Prepend the truncation banner when output was lost, and leave complete
+   * output byte-for-byte untouched.
+   */
+  private _withTruncationNotice(
+    output: string,
+    bytesDiscarded: number,
+    totalBytes: number,
+    retained: number,
+  ): string {
+    if (bytesDiscarded <= 0) return output;
+    return truncationNotice(bytesDiscarded, totalBytes, retained) + output;
   }
 
   /**
@@ -347,27 +415,31 @@ export class InteractiveSession {
     marker: string,
     startTime: number,
     timeoutMs: number,
-  ): Promise<{ text: string; timedOut: boolean; died: boolean }> {
+  ): Promise<{ text: string; timedOut: boolean; died: boolean; discarded: number }> {
     const cap = Math.max(this.outputBuffer.maxSize, 1);
     let text = "";
+    let discarded = 0;
 
     const absorb = (chunks: string[]): void => {
       if (chunks.length === 0) return;
       text += chunks.join("");
-      if (text.length > cap) text = text.slice(text.length - cap);
+      if (text.length > cap) {
+        discarded += text.length - cap;
+        text = text.slice(text.length - cap);
+      }
     };
 
     for (;;) {
       absorb(await this.outputBuffer.drainAll());
-      if (text.includes(marker)) return { text, timedOut: false, died: false };
+      if (text.includes(marker)) return { text, timedOut: false, died: false, discarded };
 
       if (!this.checkAlive()) {
         absorb(await this.outputBuffer.drainAll());
-        return { text, timedOut: false, died: !text.includes(marker) };
+        return { text, timedOut: false, died: !text.includes(marker), discarded };
       }
 
       const remaining = timeoutMs - (Date.now() - startTime);
-      if (remaining <= 0) return { text, timedOut: true, died: false };
+      if (remaining <= 0) return { text, timedOut: true, died: false, discarded };
 
       // Capped so process death (which appends nothing) is still noticed.
       await this.outputBuffer.waitForData(Math.min(remaining, SENTINEL_POLL_MS));
@@ -395,7 +467,15 @@ export class InteractiveSession {
     if (chunks.length === 0) {
       throw new SessionTerminatedError(`Session ${this.sessionId} is not active`, this.sessionId);
     }
-    const output = ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(chunks.join("")));
+    const raw = chunks.join("");
+    const bytesDiscarded = await this.outputBuffer.takeDiscarded();
+    const totalBytes = raw.length + bytesDiscarded;
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(this._stripSentinelLines(raw)),
+      bytesDiscarded,
+      totalBytes,
+      raw.length,
+    );
     const executionTime = (Date.now() - startTime) / 1000;
     this._recordReadResult(output.length, executionTime);
     return {
@@ -404,7 +484,10 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error: this._detectErrors(output) ?? null,
     };
   }
@@ -457,8 +540,15 @@ export class InteractiveSession {
     }
 
     const rawOutput = collected.join("");
+    const bytesDiscarded = await this.outputBuffer.takeDiscarded();
+    const totalBytes = rawOutput.length + bytesDiscarded;
     const executionTime = (Date.now() - startTime) / 1000;
-    const output = ANSIDecoder.cleanOpenroadOutput(rawOutput);
+    const output = this._withTruncationNotice(
+      ANSIDecoder.cleanOpenroadOutput(rawOutput),
+      bytesDiscarded,
+      totalBytes,
+      rawOutput.length,
+    );
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
@@ -469,7 +559,10 @@ export class InteractiveSession {
       timestamp: new Date().toISOString(),
       executionTime,
       commandCount: this.commandCount,
-      bufferSize: this.outputBuffer.size,
+      bufferSize: this.outputBuffer.maxSize,
+      truncated: bytesDiscarded > 0,
+      bytesDiscarded,
+      totalBytes,
       error: this._detectErrors(output) ?? null,
     };
   }
@@ -726,23 +819,147 @@ export class InteractiveSession {
     return idleTime > idleThresholdSeconds;
   }
 
-  async filterOutput(pattern: string, maxLines = 1000): Promise<string[]> {
-    const chunks = await this.outputBuffer.peekAll();
-    if (chunks.length === 0) return [];
+  /** Keep a command's output for later searching, oldest evicted first. */
+  private _retainOutput(command: string, output: string): void {
+    if (output.length === 0) return;
 
-    const text = this.outputBuffer.toText(chunks);
-    const lines = text.split("\n");
+    const maxChars = this._settings.OUTPUT_HISTORY_CHARS ?? OUTPUT_HISTORY_DEFAULTS.MAX_CHARS;
+    const maxCommands =
+      this._settings.OUTPUT_HISTORY_COMMANDS ?? OUTPUT_HISTORY_DEFAULTS.MAX_COMMANDS;
+    if (maxChars <= 0 || maxCommands <= 0) return;
 
-    let matching: string[];
+    // A single result larger than the whole budget keeps its tail, matching
+    // how the output buffer itself sheds the head.
+    const kept = output.length > maxChars ? output.slice(output.length - maxChars) : output;
+
+    this._outputHistory.push({
+      commandNumber: this.commandCount,
+      command,
+      timestamp: new Date().toISOString(),
+      output: kept,
+      truncated: kept.length < output.length,
+    });
+    this._outputHistoryChars += kept.length;
+
+    while (
+      this._outputHistory.length > maxCommands ||
+      (this._outputHistoryChars > maxChars && this._outputHistory.length > 1)
+    ) {
+      const dropped = this._outputHistory.shift()!;
+      this._outputHistoryChars -= dropped.output.length;
+      this._outputHistoryEvicted += 1;
+    }
+  }
+
+  /**
+   * Search retained command output, plus anything still sitting unread in the
+   * live buffer.
+   *
+   * `pattern` is treated as a regular expression, falling back to a substring
+   * search when it does not compile, so a caller passing a bare net name is
+   * never met with a syntax error.
+   */
+  async grepOutput(
+    pattern: string,
+    opts: { maxMatches?: number; contextLines?: number; ignoreCase?: boolean; commandNumber?: number } = {},
+  ): Promise<SessionGrepResult> {
+    const maxMatches = opts.maxMatches ?? 200;
+    const contextLines = Math.max(0, opts.contextLines ?? 0);
+    const ignoreCase = opts.ignoreCase ?? true;
+
+    const substringTest = (line: string): boolean => {
+      const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+      return (ignoreCase ? line.toLowerCase() : line).includes(needle);
+    };
+
+    let test: (line: string) => boolean;
+    let patternKind: SessionGrepResult["patternKind"];
     try {
-      const regex = new RegExp(pattern, "i");
-      matching = lines.filter((line) => regex.test(line));
+      const regex = new RegExp(pattern, ignoreCase ? "i" : "");
+      test = (line: string): boolean => regex.test(line);
+      patternKind = "regex";
     } catch {
-      // Fallback to a case-insensitive substring search on invalid regex.
-      const needle = pattern.toLowerCase();
-      matching = lines.filter((line) => line.toLowerCase().includes(needle));
+      // An uncompilable pattern is a literal, not a user error.
+      test = substringTest;
+      patternKind = "substring";
     }
 
-    return matching.length > 0 ? matching.slice(-maxLines) : [];
+    const sources: SessionOutputRecord[] = this._outputHistory.filter(
+      (r) => opts.commandNumber === undefined || r.commandNumber === opts.commandNumber,
+    );
+    if (opts.commandNumber === undefined) {
+      // Output that has arrived but not yet been consumed by a command.
+      const pending = this.outputBuffer.toText(await this.outputBuffer.peekAll());
+      if (pending.length > 0) {
+        sources.push({
+          commandNumber: this.commandCount + 1,
+          command: "(unread buffer)",
+          timestamp: new Date().toISOString(),
+          output: pending,
+          truncated: false,
+        });
+      }
+    }
+
+    const search = (
+      predicate: (line: string) => boolean,
+    ): { matches: SessionGrepMatch[]; totalMatches: number; searchedLines: number } => {
+      const found: SessionGrepMatch[] = [];
+      let total = 0;
+      let scanned = 0;
+      for (const record of sources) {
+        const lines = record.output.split("\n");
+        scanned += lines.length;
+        for (let i = 0; i < lines.length; i += 1) {
+          if (!predicate(lines[i]!)) continue;
+          total += 1;
+          if (found.length >= maxMatches) continue;
+          found.push({
+            commandNumber: record.commandNumber,
+            command: record.command,
+            lineNumber: i + 1,
+            line: lines[i]!,
+            ...(contextLines > 0 && {
+              before: lines.slice(Math.max(0, i - contextLines), i),
+              after: lines.slice(i + 1, i + 1 + contextLines),
+            }),
+          });
+        }
+      }
+      return { matches: found, totalMatches: total, searchedLines: scanned };
+    };
+
+    let { matches, totalMatches, searchedLines } = search(test);
+
+    // A pasted instance or net name like `dpath.a_reg[0]` is *valid* regex that
+    // matches nothing, which is worse than a syntax error: the caller is told
+    // there are no matches when it is the pattern that is wrong. Retry such a
+    // pattern literally and say that is what happened.
+    if (totalMatches === 0 && patternKind === "regex" && /[[\](){}.*+?^$|\\]/.test(pattern)) {
+      const literal = search(substringTest);
+      if (literal.totalMatches > 0) {
+        ({ matches, totalMatches, searchedLines } = literal);
+        patternKind = "substring-fallback";
+      }
+    }
+
+    return {
+      matches,
+      totalMatches,
+      // Say plainly when matches were dropped, rather than returning a capped
+      // list that reads like the whole answer.
+      truncated: totalMatches > matches.length,
+      patternKind,
+      searchedCommands: sources.length,
+      searchedLines,
+      retainedChars: this._outputHistoryChars,
+      evictedCommands: this._outputHistoryEvicted,
+    };
+  }
+
+  /** Matching lines only. Retained for callers that just want the text. */
+  async filterOutput(pattern: string, maxLines = 1000): Promise<string[]> {
+    const result = await this.grepOutput(pattern, { maxMatches: maxLines });
+    return result.matches.map((m) => m.line);
   }
 }

@@ -19,8 +19,12 @@ import {
   SessionHistoryTool,
   SessionMetricsTool,
   TerminateSessionTool,
+  GrepSessionOutputTool,
 } from "./tools/interactive.js";
 import { ListReportImagesTool, ReadReportImageTool } from "./tools/report_images.js";
+import { ReadOrfsMetricsTool } from "./tools/orfs_metrics.js";
+import { RunOrfsStageTool, GetOrfsJobTool, CancelOrfsJobTool } from "./tools/flow_run.js";
+import { flowJobs } from "./core/flow_jobs.js";
 
 const logger = getLogger("server");
 
@@ -34,12 +38,22 @@ const VERSION = (
   }
 ).version;
 
+/**
+ * Appended to both shell tool descriptions. Output that exceeds the session
+ * buffer loses its head, and a result that begins mid-line otherwise reads as
+ * a complete answer -- so the caller has to be told these fields exist.
+ */
+const TRUNCATION_FIELD_DOC =
+  "Results carry `truncated`, `bytes_discarded` and `total_bytes`: when `truncated` is true the " +
+  "output lost its beginning to the session buffer and is a PARTIAL answer, so do not treat it as " +
+  "complete — narrow the command and re-run.";
+
 function text(value: string): { content: [{ type: "text"; text: string }] } {
   return { content: [{ type: "text" as const, text: value }] };
 }
 
 /**
- * Build an McpServer with all 10 tools registered. Accepts an optional manager
+ * Build an McpServer with all 15 tools registered. Accepts an optional manager
  * so tests can inject an isolated/mocked one; defaults to the module singleton.
  *
  * Tool names, descriptions, input params, and annotations mirror the Python
@@ -58,6 +72,11 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   const sessionMetricsTool = new SessionMetricsTool(manager);
   const listReportImagesTool = new ListReportImagesTool(manager);
   const readReportImageTool = new ReadReportImageTool(manager);
+  const grepSessionOutputTool = new GrepSessionOutputTool(manager);
+  const readOrfsMetricsTool = new ReadOrfsMetricsTool(manager);
+  const runOrfsStageTool = new RunOrfsStageTool(manager);
+  const getOrfsJobTool = new GetOrfsJobTool(manager);
+  const cancelOrfsJobTool = new CancelOrfsJobTool(manager);
 
   mcp.registerTool(
     "interactive_openroad_query",
@@ -65,7 +84,8 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
       description:
         "Execute a read-only OpenROAD command (report_*, get_*, check_*, sta, help, etc.). " +
         "Use this for querying design state, generating reports, and inspecting timing. " +
-        "Commands that modify design state are blocked — use interactive_openroad_exec instead.",
+        "Commands that modify design state are blocked — use interactive_openroad_exec instead. " +
+        TRUNCATION_FIELD_DOC,
       inputSchema: {
         command: z.string(),
         session_id: z.string().optional(),
@@ -89,7 +109,8 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
         "Use this for loading designs, running placement/routing, applying constraints, and writing " +
         "output files. Only the BLOCKED_COMMANDS list (quit, socket, load, glob, etc.) is rejected; " +
         "read-only commands such as report_* are also accepted here. Use interactive_openroad_query " +
-        "instead for queries to keep state changes visible and auditable.",
+        "instead for queries to keep state changes visible and auditable. " +
+        TRUNCATION_FIELD_DOC,
       inputSchema: {
         command: z.string(),
         session_id: z.string().optional(),
@@ -231,12 +252,53 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
   mcp.registerTool(
     "read_report_image",
     {
-      description: "Read a report image and return base64-encoded data with metadata.",
+      description:
+        "Read a report image (congestion, IR-drop, placement, clock tree) and return it as a " +
+        "viewable image alongside its metadata. Optionally pass max_size_kb to override the " +
+        "configured base64 budget for this call; larger budgets keep more detail in heatmaps.",
       inputSchema: {
         platform: z.string(),
         design: z.string(),
         run_slug: z.string(),
         image_name: z.string(),
+        max_size_kb: z.number().int().positive().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => {
+      const { blocks, isError } = await readReportImageTool.executeContent(
+        args.platform,
+        args.design,
+        args.run_slug,
+        args.image_name,
+        args.max_size_kb,
+      );
+      return { content: blocks, ...(isError && { isError: true }) };
+    },
+  );
+
+  mcp.registerTool(
+    "grep_session_output",
+    {
+      description:
+        "Search the output of commands already run in a session, without re-running them or " +
+        "re-sending a large result. `pattern` is a regular expression, falling back to a substring " +
+        "search if it does not compile. Use `context_lines` to see surrounding lines and " +
+        "`command_number` to search one command's output. Only recent output is retained " +
+        "(OPENROAD_OUTPUT_HISTORY_CHARS, default 256 KB); the result reports how much was searched " +
+        "and whether older output has been evicted.",
+      inputSchema: {
+        session_id: z.string(),
+        pattern: z.string(),
+        max_matches: z.number().int().positive().optional(),
+        context_lines: z.number().int().nonnegative().optional(),
+        ignore_case: z.boolean().optional(),
+        command_number: z.number().int().positive().optional(),
       },
       annotations: {
         readOnlyHint: true,
@@ -247,13 +309,136 @@ export function createMcpServer(manager: OpenROADManager = defaultManager): McpS
     },
     async (args) =>
       text(
-        await readReportImageTool.execute(
-          args.platform,
-          args.design,
-          args.run_slug,
-          args.image_name,
+        await grepSessionOutputTool.execute(
+          args.session_id,
+          args.pattern,
+          args.max_matches,
+          args.context_lines,
+          args.ignore_case,
+          args.command_number,
         ),
       ),
+  );
+
+  mcp.registerTool(
+    "read_orfs_metrics",
+    {
+      description:
+        "Read an ORFS design's per-stage metrics, its rules-base.json gate thresholds evaluated " +
+        "against those metrics, and the tagged errors/warnings from each stage log. Prefer this " +
+        "over shelling out to find/cat/jq/grep in the flow tree. `stage` accepts a step name " +
+        "(cts, place, route, floorplan, synth, finish), an ORFS metric namespace " +
+        "(globalroute, detailedroute, placeopt, detailedplace), an exact file stem (4_1_cts), or " +
+        "`all` (the default). `platform` is inferred from `design` when unambiguous. Note that " +
+        "ORFS records some metrics once per sub-run: any key listed in `repeated_metrics` has an " +
+        "array of values in file order rather than a scalar.",
+      inputSchema: {
+        design: z.string(),
+        stage: z.string().optional(),
+        platform: z.string().optional(),
+        variant: z.string().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      text(
+        await readOrfsMetricsTool.execute(
+          args.design,
+          args.stage,
+          args.platform,
+          args.variant,
+        ),
+      ),
+  );
+
+  mcp.registerTool(
+    "run_orfs_stage",
+    {
+      description:
+        "Run an ORFS flow stage (synth, floorplan, place, cts, grt, route, finish, or a clean_* " +
+        "target) via make, streaming output to a file rather than the session buffer. Returns a " +
+        "job_id immediately so a multi-hour route does not block the call; pass wait_seconds to " +
+        "get the finished result inline when the stage is short. `overrides` become make " +
+        "command-line assignments (e.g. {\"CTS_CLUSTER_SIZE\": \"20\"}), which take precedence " +
+        "over both the environment and the Makefile. Poll with get_orfs_job for live progress, " +
+        "and the parsed stage metrics and gate verdicts once it finishes. Set dry_run to see what " +
+        "make would do without running it.",
+      inputSchema: {
+        design: z.string(),
+        stage: z.string(),
+        overrides: z.record(z.string(), z.string()).optional(),
+        platform: z.string().optional(),
+        variant: z.string().optional(),
+        wait_seconds: z.number().int().positive().optional(),
+        jobs: z.number().int().positive().optional(),
+        timeout_seconds: z.number().int().positive().optional(),
+        dry_run: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      text(
+        await runOrfsStageTool.execute(
+          args.design,
+          args.stage,
+          args.overrides,
+          args.platform,
+          args.variant,
+          args.wait_seconds,
+          args.jobs,
+          args.timeout_seconds,
+          args.dry_run,
+        ),
+      ),
+  );
+
+  mcp.registerTool(
+    "get_orfs_job",
+    {
+      description:
+        "Poll a flow run started by run_orfs_stage: status, elapsed time, the ORFS stage currently " +
+        "executing, detailed-route iteration and live DRC violation count, CPU and memory, and the " +
+        "tail of the run log. Once the run succeeds it also carries the parsed stage metrics and " +
+        "rules-base gate verdicts. Omit job_id to list every run.",
+      inputSchema: {
+        job_id: z.string().optional(),
+        recent_lines: z.number().int().positive().optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => text(await getOrfsJobTool.execute(args.job_id, args.recent_lines)),
+  );
+
+  mcp.registerTool(
+    "cancel_orfs_job",
+    {
+      description:
+        "Terminate a running flow job and every process it spawned, so no orphaned openroad " +
+        "process is left behind.",
+      inputSchema: { job_id: z.string() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => text(await cancelOrfsJobTool.execute(args.job_id)),
   );
 
   return mcp;
@@ -334,6 +519,9 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
  */
 export async function runServer(config: CLIConfig): Promise<void> {
   cleanupManager.registerAsyncCleanupHandler(shutdownOpenroad);
+  // A flow run outlives the server otherwise: make and its openroad children
+  // are in their own process group and would keep going after we exit.
+  cleanupManager.registerAsyncCleanupHandler(() => flowJobs.shutdown());
   cleanupManager.setupSignalHandlers();
 
   try {
