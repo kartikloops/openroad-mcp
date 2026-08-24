@@ -139,6 +139,19 @@ describe("QueryShellTool", () => {
     expect(Object.keys(converted)).toContain("session_id");
   });
 
+  it("leaves a single-token override name alone", async () => {
+    // CORNER and JOBS carry no underscore and no colon, so the guards written
+    // for CTS_CLUSTER_SIZE did not reach them: CORNER became _c_o_r_n_e_r,
+    // destroying a name run_orfs_stage documents as returned verbatim.
+    const converted = toSnakeCase({
+      overrides: { CORNER: "fast", JOBS: "8", GDS: "x.gds" },
+      sessionId: "s1",
+    }) as Record<string, Record<string, string>>;
+
+    expect(Object.keys(converted.overrides!)).toEqual(["CORNER", "JOBS", "GDS"]);
+    expect(Object.keys(converted)).toContain("session_id");
+  });
+
   it("leaves an ORFS metric key carrying a mixed-case site name intact", async () => {
     // Observed in a real run: the key is mostly lowercase, so a
     // "has no lowercase letters" guard does not protect it, and the site name

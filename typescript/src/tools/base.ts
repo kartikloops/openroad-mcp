@@ -12,7 +12,13 @@ function camelToSnakeKey(key: string): string {
   // ...rows:_free_p_d_k45_38x28_10_r__n_p_162_n_w_34_o). The second is why
   // "has no lowercase letters" was not a sufficient test: the key is mostly
   // lowercase and only the payload after the colon is mixed case.
-  if (key.includes("_") || key.includes(":")) return key;
+  //
+  // Neither test covers a single all-uppercase token -- CORNER, JOBS, GDS are
+  // all valid ORFS override names and none contains an underscore or a colon.
+  // camelCase always carries at least one lowercase letter, so "no lowercase
+  // at all" is a safe third bail-out. It is not sufficient on its own, which
+  // is what the site-name case above shows, but it closes the single-token gap.
+  if (key.includes("_") || key.includes(":") || !/[a-z]/.test(key)) return key;
   return key.replace(/[A-Z]/g, (ch) => `_${ch.toLowerCase()}`);
 }
 
