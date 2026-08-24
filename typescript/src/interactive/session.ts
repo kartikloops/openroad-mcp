@@ -286,7 +286,7 @@ export class InteractiveSession {
    * results that were never computed.
    */
   async verifyResponsive(timeoutMs = 15000): Promise<void> {
-    const result = await this.runCommand(PROBE_COMMAND, timeoutMs);
+    const result = await this.runCommand(PROBE_COMMAND, timeoutMs, false);
     if (!result.output.includes(PROBE_TOKEN)) {
       throw new SessionError(
         `Session ${this.sessionId} started but is not executing commands: the OpenROAD ` +
@@ -311,8 +311,16 @@ export class InteractiveSession {
    * PTY's echo as a successful result for anything slower than a few
    * milliseconds. This waits for an explicit sentinel and reports a real error
    * when the command does not finish inside timeoutMs.
+   *
+   * `retain` exists for the startup probe, which is plumbing rather than user
+   * activity: its output must not be searchable and must not consume any of
+   * the retention budget.
    */
-  async runCommand(command: string, timeoutMs = 30000): Promise<InteractiveExecResult> {
+  async runCommand(
+    command: string,
+    timeoutMs = 30000,
+    retain = true,
+  ): Promise<InteractiveExecResult> {
     const startTime = Date.now();
 
     if (!this.checkAlive()) {
@@ -353,7 +361,7 @@ export class InteractiveSession {
 
     await this._updatePerformanceMetrics();
     this._recordReadResult(output.length, executionTime);
-    this._retainOutput(command, output);
+    if (retain) this._retainOutput(command, output);
 
     // An incomplete result outranks anything matched inside it: a command that
     // printed "Error:" and then kept running must not look like it finished.

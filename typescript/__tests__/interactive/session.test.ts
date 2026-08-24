@@ -435,6 +435,26 @@ describe("InteractiveSession", () => {
       expect(session.commandCount).toBe(0);
     });
 
+    it("keeps the startup probe out of the searchable output history", async () => {
+      wirePty({ thinkMs: 10, output: "ORMCP-READY-OK\r\n" });
+      await session.verifyResponsive(2000);
+
+      // The probe ran through runCommand, so its output was being retained and
+      // charged to the retention budget like a user command.
+      const probe = await session.grepOutput("ORMCP-READY-OK");
+      expect(probe.totalMatches).toBe(0);
+      expect(probe.retainedChars).toBe(0);
+
+      // It also consumed command number 1 before verifyResponsive reset the
+      // counter, so the caller's first real command collided with it.
+      wirePty({ thinkMs: 10, output: "wns max -0.485\r\n" });
+      await session.runCommand("report_checks", 2000);
+
+      const grep = await session.grepOutput("wns max");
+      expect(grep.searchedCommands).toBe(1);
+      expect(grep.matches.map((m) => m.commandNumber)).toEqual([1]);
+    });
+
     it("reports a timeout even when the partial output contains an error pattern", async () => {
       wirePty({ thinkMs: 10, output: "Error: something went wrong\r\n", emitSentinel: false });
 
