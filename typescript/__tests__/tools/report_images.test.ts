@@ -879,6 +879,30 @@ describe("ReadReportImageTool — image content blocks and size budget", () => {
     expect(result.metadata.height).toBe(1099);
   });
 
+  it("sheds quality before resolution when the budget is tight", async () => {
+    // The ladder used to exhaust every size at q85 before dropping to q70, so
+    // a 1099px render that missed the budget at q85 came back as an 824px
+    // thumbnail even though the full-size q70 encoding fit inside it. For a
+    // congestion map that trade is backwards.
+    const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
+    await writeNoisyWebp(path.join(runPath, "final_congestion.webp"), 1099, 1099);
+    mockSettings(flowPath);
+
+    const result = JSON.parse(
+      await new ReadReportImageTool(stubManager).execute(
+        "nangate45",
+        "gcd",
+        "run-123",
+        "final_congestion.webp",
+        800,
+      ),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.metadata.width).toBe(1099);
+    expect(result.metadata.height).toBe(1099);
+  });
+
   it("caps the long edge at the configured maximum and preserves aspect ratio", async () => {
     const { flowPath, runPath } = createFixture("nangate45", "gcd", "run-123", []);
     await writeRealWebp(path.join(runPath, "final_all.webp"), 4000, 2000);

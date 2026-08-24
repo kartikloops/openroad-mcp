@@ -29,7 +29,12 @@ const MAX_IMAGE_SIZE_MB = 50;
  */
 const RESIZE_LADDER_FACTOR = 0.75;
 const QUALITY_LADDER = [85, 70, 55] as const;
-const MAX_ENCODE_ATTEMPTS = 12;
+/** Safety valve on the search, not a tuning knob. It has to clear the whole
+ * default ladder or the cap silently truncates it: 1568px down to the 512px
+ * floor at 0.75 is five size rungs, times three quality rungs, is fifteen. At
+ * the old 12 a full-size image never reached its smallest rung -- the one rung
+ * that exists for images nothing else fits. */
+const MAX_ENCODE_ATTEMPTS = 24;
 
 /** An MCP content block: a real image block, or accompanying text. */
 export type ContentBlock =
@@ -275,16 +280,21 @@ async function loadAndCompressImage(
 
   try {
     let dim = Math.min(longEdge, maxDimension);
-    let best: { buf: Buffer; dim: number } | null = null;
+    let best: { buf: Buffer; dim: number; quality: number } | null = null;
     let attempts = 0;
 
-    for (const quality of QUALITY_LADDER) {
-      let rungDim = dim;
-      for (;;) {
+    // Quality is shed before resolution. A congestion or routing image carries
+    // its signal in fine wire and via detail, which downsampling destroys
+    // outright, while WebP quality loss degrades it gracefully -- so every
+    // quality rung is tried at the current size before the image is made
+    // smaller. The previous order inverted this and returned a 512px q85
+    // thumbnail where a full-resolution q70 encoding was within budget.
+    while (attempts < MAX_ENCODE_ATTEMPTS) {
+      for (const quality of QUALITY_LADDER) {
         if (attempts >= MAX_ENCODE_ATTEMPTS) break;
         attempts += 1;
         const buf = await sharp(imagePath)
-          .resize(rungDim, rungDim, {
+          .resize(dim, dim, {
             fit: "inside",
             withoutEnlargement: true,
             kernel: "lanczos3",
@@ -292,16 +302,13 @@ async function loadAndCompressImage(
           .webp({ quality })
           .toBuffer();
 
-        if (buf.length <= targetBytes) return await describeEncoded(buf, rungDim, quality);
+        if (buf.length <= targetBytes) return await describeEncoded(buf, dim, quality);
         // Remember the smallest encoding produced, so a budget that nothing
         // satisfies still returns the closest image rather than raw bytes.
-        if (best === null || buf.length < best.buf.length) best = { buf, dim: rungDim };
-        if (rungDim <= minDimension) break;
-        rungDim = Math.max(minDimension, Math.floor(rungDim * RESIZE_LADDER_FACTOR));
+        if (best === null || buf.length < best.buf.length) best = { buf, dim, quality };
       }
-      // Next quality rung restarts from the capped dimension.
-      dim = Math.min(longEdge, maxDimension);
-      if (attempts >= MAX_ENCODE_ATTEMPTS) break;
+      if (dim <= minDimension) break;
+      dim = Math.max(minDimension, Math.floor(dim * RESIZE_LADDER_FACTOR));
     }
 
     if (best === null) return rawFallback(sniffedFormat, origW, origH);
@@ -309,7 +316,9 @@ async function loadAndCompressImage(
       { imagePath, maxSizeKb, resultBytes: best.buf.length },
       "Image could not be squeezed within its base64 budget; returning the smallest encoding produced",
     );
-    return await describeEncoded(best.buf, best.dim, QUALITY_LADDER[QUALITY_LADDER.length - 1]!);
+    // Report the quality that actually produced this buffer; the fallback used
+    // to hardcode the last ladder rung and mislabel a q85 encoding as q55.
+    return await describeEncoded(best.buf, best.dim, best.quality);
   } catch (e) {
     logger.warn({ err: e, imagePath }, "Image compression failed; returning raw bytes with null dims");
     return rawFallback(sniffedFormat, origW, origH);

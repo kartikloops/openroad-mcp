@@ -555,6 +555,14 @@ to anyway), then a size/quality ladder steps down only while the encoding still 
 `OPENROAD_IMAGE_MIN_DIMENSION` (default 512 px). Most report images now pass through untouched.
 The 50 MB on-disk limit is enforced before any resizing.
 
+**Quality is shed before resolution.** Every quality rung (85, 70, 55) is tried at the current
+size before the image is made smaller, and the first encoding that fits the budget is returned.
+A congestion or routing map carries its signal in fine wire and via detail, which downsampling
+destroys outright, while WebP quality loss degrades it gracefully — so a full-resolution q70
+image is returned in preference to a downscaled q85 one. `width`/`height` in the response are
+the dimensions actually returned; compare them against `original_width`/`original_height` to see
+whether resizing was reached at all.
+
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
 | `platform` | string | **yes** | — |
