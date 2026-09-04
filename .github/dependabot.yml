@@ -1,31 +1,15 @@
 version: 2
 
-# Security updates fire automatically from the dependency graph and do not need
-# to be declared here. This file adds the two things that were missing: scheduled
-# version updates, and coverage of the github-actions ecosystem so the SHA pins
-# in .github/workflows do not silently rot.
-#
-# Note: only `python/uv.lock` and `typescript/package-lock.json` are real
-# manifests. Alerts naming a bare `uv.lock` target a path deleted in #142 and are
-# stale dependency-graph entries, not live dependencies.
-
+# There is no uv entry. PR #168 removed the Python distribution and its
+# pyproject.toml, so uv has nothing to resolve. The root uv.lock is an orphan.
 updates:
-  - package-ecosystem: uv
-    directory: /python
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: build(deps)
-      prefix-development: build(deps-dev)
-    groups:
-      python:
-        patterns:
-          - "*"
-
   - package-ecosystem: npm
     directory: /typescript
     schedule:
-      interval: weekly
+      interval: daily
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: build(deps)
       prefix-development: build(deps-dev)
@@ -37,10 +21,46 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: build(deps)
     groups:
       actions:
+        patterns:
+          - "*"
+
+  # The entry above scans .github/workflows only, so composite actions need
+  # their own entry. Do not merge the two.
+  - package-ecosystem: github-actions
+    directories:
+      - /.github/actions/*
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build(deps)
+    groups:
+      composite-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /.devcontainer
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build(deps)
+    groups:
+      images:
         patterns:
           - "*"
